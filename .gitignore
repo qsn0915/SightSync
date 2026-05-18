@@ -1,0 +1,29 @@
+# Local IDE and OS files
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Gradle and Kotlin caches
+.gradle/
+.kotlin/
+build/
+**/build/
+
+# Android local SDK configuration
+local.properties
+
+# Backend dependencies and local secrets
+backend/node_modules/
+node_modules/
+.env
+.env.*
+
+# Runtime logs and temporary output
+*.log
+*.tmp
+*.bak
+
+# Android generated packages
+*.apk
+*.aab
