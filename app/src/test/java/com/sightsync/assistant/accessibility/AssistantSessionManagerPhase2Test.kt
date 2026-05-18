@@ -47,6 +47,24 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun oneShotPromptFinishesBeforeListeningStarts() = runTest {
+        val tts = GateSpeechOutput()
+        val speech = FakeSpeechInput(SpeechInputResult.Recognized("这里有什么"))
+        val manager = manager(tts, speech)
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals("请说。", tts.awaitingText)
+        assertFalse(speech.listenStarted.isCompleted)
+
+        tts.finishSpeaking()
+        advanceUntilIdle()
+
+        assertTrue(speech.listenStarted.isCompleted)
+    }
+
+    @Test
     fun secondClickCancelsActiveRequestWithoutFailurePrompt() = runTest {
         val tts = FakeSpeechOutput()
         val speech = FakeSpeechInput()
@@ -422,7 +440,7 @@ class AssistantSessionManagerPhase2Test {
     }
 
     private fun TestScope.manager(
-        tts: FakeSpeechOutput,
+        tts: SpeechOutput,
         speech: FakeSpeechInput,
         screen: FakeScreenContextProvider = FakeScreenContextProvider(),
         ai: FakeAssistantClient = FakeAssistantClient(response = AssistResponse(spoken = "好的。")),
@@ -438,6 +456,35 @@ class AssistantSessionManagerPhase2Test {
             assistantClient = ai,
             actionRunner = actions,
         )
+    }
+}
+
+private class GateSpeechOutput : SpeechOutput {
+    val spoken = mutableListOf<String>()
+    var awaitingText: String? = null
+    private var gate = CompletableDeferred<Unit>()
+
+    override val isSpeaking: Boolean
+        get() = awaitingText != null && !gate.isCompleted
+
+    override fun speak(text: String) {
+        spoken += text
+    }
+
+    override suspend fun speakAndAwait(text: String) {
+        spoken += text
+        awaitingText = text
+        gate.await()
+        awaitingText = null
+        gate = CompletableDeferred()
+    }
+
+    override fun stop() {
+        finishSpeaking()
+    }
+
+    fun finishSpeaking() {
+        if (!gate.isCompleted) gate.complete(Unit)
     }
 }
 
