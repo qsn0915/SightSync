@@ -11,7 +11,10 @@ import java.io.IOException
 
 class ShortAudioRecorder(
     private val context: Context,
-    private val durationMillis: Long = 4_000L,
+    private val minDurationMillis: Long = 800L,
+    private val trailingSilenceMillis: Long = 900L,
+    private val maxDurationMillis: Long = 8_000L,
+    private val pollIntervalMillis: Long = 100L,
 ) : AudioRecorder {
     private var recorder: MediaRecorder? = null
 
@@ -30,7 +33,17 @@ class ShortAudioRecorder(
         try {
             activeRecorder.prepare()
             activeRecorder.start()
-            delay(durationMillis)
+            val detector = SilenceDetector(
+                minDurationMillis = minDurationMillis,
+                trailingSilenceMillis = trailingSilenceMillis,
+                maxDurationMillis = maxDurationMillis,
+            )
+            val startedAt = System.currentTimeMillis()
+            do {
+                delay(pollIntervalMillis)
+                val elapsed = System.currentTimeMillis() - startedAt
+                val amplitude = runCatching { activeRecorder.maxAmplitude }.getOrDefault(0)
+            } while (!detector.shouldStop(amplitude, elapsed))
             stopRecorder(activeRecorder)
             val bytes = outputFile.readBytes()
             if (bytes.isEmpty()) throw IOException("recorded audio is empty")
