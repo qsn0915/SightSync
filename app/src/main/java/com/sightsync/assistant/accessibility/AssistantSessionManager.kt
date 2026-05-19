@@ -8,10 +8,9 @@ import com.sightsync.assistant.core.ScreenContextProvider
 import com.sightsync.assistant.speech.SpeechInput
 import com.sightsync.assistant.speech.SpeechInputResult
 import com.sightsync.assistant.speech.SpeechOutput
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import java.io.IOException
@@ -31,6 +30,12 @@ class AssistantSessionManager(
     private var continuousJob: Job? = null
     private val confirmationManager = ConfirmationManager()
     private val sessionId = UUID.randomUUID().toString()
+    private var voiceState: VoiceInteractionState = VoiceInteractionState.Idle
+    private val voiceTurnCoordinator = VoiceTurnCoordinator(
+        speechInput = speechInput,
+        speechOutput = speechOutput,
+        onStateChanged = { state -> voiceState = state },
+    )
 
     val isContinuousListening: Boolean
         get() = continuousJob?.isActive == true
@@ -48,7 +53,7 @@ class AssistantSessionManager(
         }
 
         if (speechOutput.isSpeaking) {
-            speechOutput.stop()
+            voiceTurnCoordinator.cancelVoice()
             return
         }
 
@@ -68,20 +73,19 @@ class AssistantSessionManager(
             cancelActiveRequest()
         }
         if (speechOutput.isSpeaking) {
-            speechOutput.stop()
+            voiceTurnCoordinator.cancelVoice()
         }
 
         continuousJob = scope.launch {
             try {
-                speechOutput.speak("连续聆听已开启。")
-                delay(700)
+                voiceTurnCoordinator.speakResult("连续聆听已开启。")
                 while (true) {
                     val result = runAssistantTurn(
                         promptBeforeListening = false,
                         stopCommandEndsContinuousListening = true,
                     )
                     if (result == TurnResult.StopRequested) {
-                        speechOutput.speak("已停止聆听。")
+                        voiceTurnCoordinator.speakResult("已停止聆听。")
                         break
                     }
                 }
@@ -99,18 +103,20 @@ class AssistantSessionManager(
         continuousJob = null
         onContinuousListeningChanged(false)
         confirmationManager.clear()
-        speechInput.cancel()
-        speechOutput.stop()
-        speechOutput.speak("已停止聆听。")
+        voiceTurnCoordinator.cancelVoice()
+        scope.launch {
+            voiceTurnCoordinator.speakResult("已停止聆听。")
+        }
     }
 
     private fun cancelActiveRequest() {
         activeJob?.cancel()
         activeJob = null
         confirmationManager.clear()
-        speechInput.cancel()
-        speechOutput.stop()
-        speechOutput.speak("已取消。")
+        voiceTurnCoordinator.cancelVoice()
+        scope.launch {
+            voiceTurnCoordinator.speakResult("已取消。")
+        }
     }
 
     private suspend fun runAssistantTurn(
@@ -118,16 +124,14 @@ class AssistantSessionManager(
         stopCommandEndsContinuousListening: Boolean,
     ): TurnResult {
         return try {
-            if (promptBeforeListening) {
-                speechOutput.speak("请说。")
-                delay(700)
-            }
-            val speechResult = speechInput.listenOnce()
+            val speechResult = voiceTurnCoordinator.listenForTurn(
+                prompt = if (promptBeforeListening) "请说。" else null,
+            )
             val utterance = when (speechResult) {
                 is SpeechInputResult.Recognized -> speechResult.text.trim()
                 is SpeechInputResult.Failed -> {
                     if (!stopCommandEndsContinuousListening || !isNoSpeechFailure(speechResult.message)) {
-                        speechOutput.speak(speechResult.message)
+                        voiceTurnCoordinator.speakResult(speechResult.message)
                     }
                     return TurnResult.Completed
                 }
@@ -135,7 +139,7 @@ class AssistantSessionManager(
             }
             if (utterance.isBlank()) {
                 if (!stopCommandEndsContinuousListening) {
-                    speechOutput.speak("我没有听清，请再说一次。")
+                    voiceTurnCoordinator.speakResult("我没有听清，请再说一次。")
                 }
                 return TurnResult.Completed
             }
@@ -155,12 +159,13 @@ class AssistantSessionManager(
             if (confirmationManager.hasPending) {
                 confirmationManager.clear()
                 if (confirmationManager.isCancellation(utterance)) {
-                    speechOutput.speak("已取消高风险操作。")
+                    voiceTurnCoordinator.speakResult("已取消高风险操作。")
                     return TurnResult.Completed
                 }
             }
 
-            speechOutput.speak("正在查看当前屏幕。")
+            voiceTurnCoordinator.speakResult("正在查看当前屏幕。")
+            voiceState = VoiceInteractionState.Thinking
             val screenContext = screenContextProvider.collect()
             val response = assistantClient.assist(
                 sessionId = sessionId,
@@ -171,7 +176,7 @@ class AssistantSessionManager(
 
             val validation = AiProtocolValidator.validate(response)
             if (!validation.isValid) {
-                speechOutput.speak("AI 返回了不支持的动作，已拒绝执行。${validation.reason}")
+                voiceTurnCoordinator.speakResult("AI 返回了不支持的动作，已拒绝执行。${validation.reason}")
                 return TurnResult.Completed
             }
 
@@ -179,7 +184,7 @@ class AssistantSessionManager(
                 RiskClassifier.requiresConfirmation(utterance, response.actions, screenContext)
             if (risky && response.actions.isNotEmpty()) {
                 confirmationManager.store(response, screenContext)
-                speechOutput.speak("${response.spoken} 这是高风险操作，如需继续，请再次唤起并说确认执行。")
+                voiceTurnCoordinator.speakResult("${response.spoken} 这是高风险操作，如需继续，请再次唤起并说确认执行。")
                 return TurnResult.Completed
             }
 
@@ -188,19 +193,19 @@ class AssistantSessionManager(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (timeout: InterruptedIOException) {
-            speechOutput.speak("AI 请求超时，请稍后重试。")
+            voiceTurnCoordinator.speakResult("AI 请求超时，请稍后重试。")
             TurnResult.Completed
         } catch (network: IOException) {
-            speechOutput.speak("网络连接失败，请检查网络后重试。")
+            voiceTurnCoordinator.speakResult("网络连接失败，请检查网络后重试。")
             TurnResult.Completed
         } catch (security: SecurityException) {
-            speechOutput.speak("无障碍权限已关闭，请重新开启后再试。")
+            voiceTurnCoordinator.speakResult("无障碍权限已关闭，请重新开启后再试。")
             TurnResult.Completed
         } catch (serialization: SerializationException) {
-            speechOutput.speak("AI 返回内容无法解析，已停止执行。")
+            voiceTurnCoordinator.speakResult("AI 返回内容无法解析，已停止执行。")
             TurnResult.Completed
         } catch (error: Throwable) {
-            speechOutput.speak("操作失败，请重试。${error.message ?: "未知错误"}")
+            voiceTurnCoordinator.speakResult("操作失败，请重试。${error.message ?: "未知错误"}")
             TurnResult.Completed
         }
     }
@@ -219,16 +224,17 @@ class AssistantSessionManager(
         sourceScreen: ScreenContext,
     ) {
         if (response.spoken.isNotBlank()) {
-            speechOutput.speak(response.spoken)
+            voiceTurnCoordinator.speakResult(response.spoken)
         }
         if (response.actions.isEmpty()) return
+        voiceState = VoiceInteractionState.Acting
         val results = actionRunner.execute(response.actions, confirmed, sourceScreen)
         val failed = results.firstOrNull { !it.success }
         if (failed != null) {
             if (failed.requiresScreenRefresh) {
                 screenContextProvider.collect()
             }
-            speechOutput.speak(failed.message)
+            voiceTurnCoordinator.speakResult(failed.message)
         }
     }
 

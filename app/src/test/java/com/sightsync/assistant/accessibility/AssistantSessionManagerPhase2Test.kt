@@ -47,6 +47,24 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun oneShotPromptFinishesBeforeListeningStarts() = runTest {
+        val tts = GateSpeechOutput()
+        val speech = FakeSpeechInput(SpeechInputResult.Recognized("这里有什么"))
+        val manager = manager(tts, speech)
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals("请说。", tts.awaitingText)
+        assertFalse(speech.listenStarted.isCompleted)
+
+        tts.finishSpeaking()
+        advanceUntilIdle()
+
+        assertTrue(speech.listenStarted.isCompleted)
+    }
+
+    @Test
     fun secondClickCancelsActiveRequestWithoutFailurePrompt() = runTest {
         val tts = FakeSpeechOutput()
         val speech = FakeSpeechInput()
@@ -83,6 +101,40 @@ class AssistantSessionManagerPhase2Test {
         assertEquals(2, screen.collectCount)
         assertFalse(manager.isContinuousListening)
         assertTrue(tts.spoken.contains("已停止聆听。"))
+    }
+
+    @Test
+    fun continuousListeningWaitsForResultSpeechBeforeNextListen() = runTest {
+        val tts = GateSpeechOutput()
+        val speech = FakeSpeechInput(
+            SpeechInputResult.Recognized("这里有什么"),
+            SpeechInputResult.Recognized("停止聆听"),
+        )
+        val manager = manager(
+            tts = tts,
+            speech = speech,
+            ai = FakeAssistantClient(response = AssistResponse(spoken = "当前页面有设置。")),
+        )
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertEquals("连续聆听已开启。", tts.awaitingText)
+        assertFalse(speech.listenStarted.isCompleted)
+        assertTrue(speech.startedUtterances.isEmpty())
+
+        tts.finishSpeaking() // 连续聆听已开启。
+        advanceUntilIdle()
+
+        assertTrue(speech.listenStarted.isCompleted)
+        assertEquals(listOf("这里有什么"), speech.startedUtterances)
+
+        tts.finishSpeaking() // 正在查看当前屏幕。
+        advanceUntilIdle()
+        tts.finishSpeaking() // 当前页面有设置。
+        advanceUntilIdle()
+
+        assertEquals(listOf("这里有什么", "停止聆听"), speech.startedUtterances)
     }
 
     @Test
@@ -422,7 +474,7 @@ class AssistantSessionManagerPhase2Test {
     }
 
     private fun TestScope.manager(
-        tts: FakeSpeechOutput,
+        tts: SpeechOutput,
         speech: FakeSpeechInput,
         screen: FakeScreenContextProvider = FakeScreenContextProvider(),
         ai: FakeAssistantClient = FakeAssistantClient(response = AssistResponse(spoken = "好的。")),
@@ -441,16 +493,48 @@ class AssistantSessionManagerPhase2Test {
     }
 }
 
+private class GateSpeechOutput : SpeechOutput {
+    val spoken = mutableListOf<String>()
+    var awaitingText: String? = null
+    private var gate = CompletableDeferred<Unit>()
+
+    override val isSpeaking: Boolean
+        get() = awaitingText != null && !gate.isCompleted
+
+    override fun speak(text: String) {
+        spoken += text
+    }
+
+    override suspend fun speakAndAwait(text: String) {
+        spoken += text
+        awaitingText = text
+        gate.await()
+        awaitingText = null
+        gate = CompletableDeferred()
+    }
+
+    override fun stop() {
+        finishSpeaking()
+    }
+
+    fun finishSpeaking() {
+        if (!gate.isCompleted) gate.complete(Unit)
+    }
+}
+
 private class FakeSpeechInput(
     vararg results: SpeechInputResult,
 ) : SpeechInput {
     private val pendingResults = ArrayDeque(results.toList())
     val listenStarted = CompletableDeferred<Unit>()
+    val startedUtterances = mutableListOf<String>()
     var cancelCalled = false
 
     override suspend fun listenOnce(): SpeechInputResult {
         listenStarted.complete(Unit)
-        return pendingResults.removeFirstOrNull() ?: awaitCancellation()
+        val result = pendingResults.removeFirstOrNull() ?: awaitCancellation()
+        if (result is SpeechInputResult.Recognized) startedUtterances += result.text
+        return result
     }
 
     override fun cancel() {
