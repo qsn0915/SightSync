@@ -1,7 +1,7 @@
 # SightSync
 
-SightSync is an Android accessibility assistant prototype with a small Node.js AI
-proxy.
+SightSync 是一个面向盲人用户的 Android AI 无障碍助手原型，包含现有
+Android App 和一个小型 Node.js AI proxy。
 
 ## Phase 1
 
