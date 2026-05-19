@@ -8,10 +8,9 @@ import com.sightsync.assistant.core.ScreenContextProvider
 import com.sightsync.assistant.speech.SpeechInput
 import com.sightsync.assistant.speech.SpeechInputResult
 import com.sightsync.assistant.speech.SpeechOutput
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import java.io.IOException
@@ -54,7 +53,7 @@ class AssistantSessionManager(
         }
 
         if (speechOutput.isSpeaking) {
-            speechOutput.stop()
+            voiceTurnCoordinator.cancelVoice()
             return
         }
 
@@ -74,20 +73,19 @@ class AssistantSessionManager(
             cancelActiveRequest()
         }
         if (speechOutput.isSpeaking) {
-            speechOutput.stop()
+            voiceTurnCoordinator.cancelVoice()
         }
 
         continuousJob = scope.launch {
             try {
-                speechOutput.speak("连续聆听已开启。")
-                delay(700)
+                voiceTurnCoordinator.speakResult("连续聆听已开启。")
                 while (true) {
                     val result = runAssistantTurn(
                         promptBeforeListening = false,
                         stopCommandEndsContinuousListening = true,
                     )
                     if (result == TurnResult.StopRequested) {
-                        speechOutput.speak("已停止聆听。")
+                        voiceTurnCoordinator.speakResult("已停止聆听。")
                         break
                     }
                 }
@@ -105,18 +103,20 @@ class AssistantSessionManager(
         continuousJob = null
         onContinuousListeningChanged(false)
         confirmationManager.clear()
-        speechInput.cancel()
-        speechOutput.stop()
-        speechOutput.speak("已停止聆听。")
+        voiceTurnCoordinator.cancelVoice()
+        scope.launch {
+            voiceTurnCoordinator.speakResult("已停止聆听。")
+        }
     }
 
     private fun cancelActiveRequest() {
         activeJob?.cancel()
         activeJob = null
         confirmationManager.clear()
-        speechInput.cancel()
-        speechOutput.stop()
-        speechOutput.speak("已取消。")
+        voiceTurnCoordinator.cancelVoice()
+        scope.launch {
+            voiceTurnCoordinator.speakResult("已取消。")
+        }
     }
 
     private suspend fun runAssistantTurn(

@@ -104,6 +104,40 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun continuousListeningWaitsForResultSpeechBeforeNextListen() = runTest {
+        val tts = GateSpeechOutput()
+        val speech = FakeSpeechInput(
+            SpeechInputResult.Recognized("这里有什么"),
+            SpeechInputResult.Recognized("停止聆听"),
+        )
+        val manager = manager(
+            tts = tts,
+            speech = speech,
+            ai = FakeAssistantClient(response = AssistResponse(spoken = "当前页面有设置。")),
+        )
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertEquals("连续聆听已开启。", tts.awaitingText)
+        assertFalse(speech.listenStarted.isCompleted)
+        assertTrue(speech.startedUtterances.isEmpty())
+
+        tts.finishSpeaking() // 连续聆听已开启。
+        advanceUntilIdle()
+
+        assertTrue(speech.listenStarted.isCompleted)
+        assertEquals(listOf("这里有什么"), speech.startedUtterances)
+
+        tts.finishSpeaking() // 正在查看当前屏幕。
+        advanceUntilIdle()
+        tts.finishSpeaking() // 当前页面有设置。
+        advanceUntilIdle()
+
+        assertEquals(listOf("这里有什么", "停止聆听"), speech.startedUtterances)
+    }
+
+    @Test
     fun continuousStopCommandDoesNotCallAi() = runTest {
         val tts = FakeSpeechOutput()
         val speech = FakeSpeechInput(SpeechInputResult.Recognized("暂停助手"))
@@ -493,11 +527,14 @@ private class FakeSpeechInput(
 ) : SpeechInput {
     private val pendingResults = ArrayDeque(results.toList())
     val listenStarted = CompletableDeferred<Unit>()
+    val startedUtterances = mutableListOf<String>()
     var cancelCalled = false
 
     override suspend fun listenOnce(): SpeechInputResult {
         listenStarted.complete(Unit)
-        return pendingResults.removeFirstOrNull() ?: awaitCancellation()
+        val result = pendingResults.removeFirstOrNull() ?: awaitCancellation()
+        if (result is SpeechInputResult.Recognized) startedUtterances += result.text
+        return result
     }
 
     override fun cancel() {
