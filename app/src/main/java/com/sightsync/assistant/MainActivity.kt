@@ -278,6 +278,11 @@ private fun PrivacyExplanationScreen(onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
+                        text = "为了执行“打开浏览器”这类指令，SightSync 会在本地读取可启动应用名称和包名用于匹配；这一步不会上传应用列表。",
+                        color = Color(0xFF4D5963),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
                         text = "密码、验证码、银行卡号等敏感字段会优先在本地脱敏；后续阶段会继续按纲领限制动作白名单和高风险确认。",
                         color = Color(0xFF4D5963),
                         style = MaterialTheme.typography.bodyMedium,

@@ -1,38 +1,47 @@
 package com.sightsync.assistant.speech
 
 import android.content.Context
-import android.media.MediaRecorder
-import android.os.Build
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder.AudioSource
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.io.IOException
 
 class ShortAudioRecorder(
-    private val context: Context,
+    @Suppress("UNUSED_PARAMETER")
+    context: Context,
+    private val sampleRate: Int = 16_000,
     private val minDurationMillis: Long = 800L,
     private val trailingSilenceMillis: Long = 900L,
     private val maxDurationMillis: Long = 8_000L,
-    private val pollIntervalMillis: Long = 100L,
 ) : AudioRecorder {
-    private var recorder: MediaRecorder? = null
+    private var recorder: AudioRecord? = null
 
     override suspend fun recordOnce(): RecordedAudio = withContext(Dispatchers.IO) {
-        val outputFile = File.createTempFile("sightsync-utterance-", ".m4a", context.cacheDir)
-        val activeRecorder = createRecorder().apply {
-            setAudioSource(MediaRecorder.AudioSource.MIC)
-            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            setAudioSamplingRate(16_000)
-            setAudioEncodingBitRate(64_000)
-            setOutputFile(outputFile.absolutePath)
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (minBufferSize <= 0) throw IOException("audio recorder buffer is unavailable")
+        val frame = ShortArray(minBufferSize / BYTES_PER_SAMPLE)
+        val sampleBuffer = PcmSampleBuffer(initialCapacity = sampleRate)
+        val activeRecorder = AudioRecord(
+            AudioSource.MIC,
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            minBufferSize,
+        )
+        if (activeRecorder.state != AudioRecord.STATE_INITIALIZED) {
+            activeRecorder.release()
+            throw IOException("audio recorder failed to initialize")
         }
         recorder = activeRecorder
 
         try {
-            activeRecorder.prepare()
-            activeRecorder.start()
+            activeRecorder.startRecording()
             val detector = SilenceDetector(
                 minDurationMillis = minDurationMillis,
                 trailingSilenceMillis = trailingSilenceMillis,
@@ -40,18 +49,25 @@ class ShortAudioRecorder(
             )
             val startedAt = System.currentTimeMillis()
             do {
-                delay(pollIntervalMillis)
+                val read = activeRecorder.read(frame, 0, frame.size)
                 val elapsed = System.currentTimeMillis() - startedAt
-                val amplitude = runCatching { activeRecorder.maxAmplitude }.getOrDefault(0)
+                val amplitude = if (read > 0) {
+                    sampleBuffer.append(frame, read)
+                    PcmFrameEnergy.maxAmplitude(frame, read)
+                } else {
+                    0
+                }
             } while (!detector.shouldStop(amplitude, elapsed))
             stopRecorder(activeRecorder)
-            val bytes = outputFile.readBytes()
-            if (bytes.isEmpty()) throw IOException("recorded audio is empty")
-            RecordedAudio(bytes = bytes, mimeType = "audio/mp4")
+            val samples = sampleBuffer.toShortArray()
+            if (samples.isEmpty()) throw IOException("recorded audio is empty")
+            RecordedAudio(
+                bytes = WavEncoder.encodePcm16Mono(samples, sampleRate),
+                mimeType = "audio/wav",
+            )
         } finally {
             releaseRecorder(activeRecorder)
             recorder = null
-            outputFile.delete()
         }
     }
 
@@ -63,15 +79,7 @@ class ShortAudioRecorder(
         recorder = null
     }
 
-    private fun createRecorder(): MediaRecorder =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            MediaRecorder(context)
-        } else {
-            @Suppress("DEPRECATION")
-            MediaRecorder()
-        }
-
-    private fun stopRecorder(activeRecorder: MediaRecorder) {
+    private fun stopRecorder(activeRecorder: AudioRecord) {
         try {
             activeRecorder.stop()
         } catch (error: RuntimeException) {
@@ -79,8 +87,11 @@ class ShortAudioRecorder(
         }
     }
 
-    private fun releaseRecorder(activeRecorder: MediaRecorder) {
-        runCatching { activeRecorder.reset() }
+    private fun releaseRecorder(activeRecorder: AudioRecord) {
         runCatching { activeRecorder.release() }
+    }
+
+    private companion object {
+        const val BYTES_PER_SAMPLE = 2
     }
 }

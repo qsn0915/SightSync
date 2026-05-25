@@ -2,6 +2,9 @@ package com.sightsync.assistant.accessibility
 
 import com.sightsync.assistant.ai.AssistantAction
 import com.sightsync.assistant.ai.AssistResponse
+import com.sightsync.assistant.apps.AppCatalogProvider
+import com.sightsync.assistant.apps.InstalledApp
+import com.sightsync.assistant.apps.OpenAppCommandResolver
 import com.sightsync.assistant.core.ActionResult
 import com.sightsync.assistant.core.NodeBounds
 import com.sightsync.assistant.core.ScreenContext
@@ -155,6 +158,23 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun plainStopCommandDoesNotCallAiDuringContinuousListening() = runTest {
+        val tts = FakeSpeechOutput()
+        val speech = FakeSpeechInput(SpeechInputResult.Recognized("停止"))
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val manager = manager(tts, speech, screen, ai)
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertTrue(ai.utterances.isEmpty())
+        assertEquals(0, screen.collectCount)
+        assertFalse(manager.isContinuousListening)
+        assertTrue(tts.spoken.contains("已停止聆听。"))
+    }
+
+    @Test
     fun continuousNoSpeechResultKeepsListeningWithoutRepeatedFailurePrompt() = runTest {
         val tts = FakeSpeechOutput()
         val speech = FakeSpeechInput(
@@ -281,6 +301,113 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun localOpenAppCommandExecutesWithoutCollectingScreenOrCallingAi() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = FakeActionRunner()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("帮我打开设置")),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "设置", packageName = "com.android.settings"),
+            ),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertEquals(
+            listOf(AssistantAction(type = "OPEN_APP", appPackage = "com.android.settings")),
+            actions.executions.single().actions,
+        )
+        assertTrue(tts.spoken.contains("我会打开设置。"))
+    }
+
+    @Test
+    fun ambiguousLocalOpenAppCommandAsksWithoutExecutingOrCallingAi() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = FakeActionRunner()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("打开微信")),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "微信", packageName = "com.tencent.mm"),
+                InstalledApp(label = "企业微信", packageName = "com.tencent.wework"),
+            ),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertTrue(actions.executions.isEmpty())
+        assertTrue(tts.spoken.any { it.contains("我找到了多个应用") })
+    }
+
+    @Test
+    fun unmatchedLocalOpenAppCommandFallsBackToExistingAiFlow() = runTest {
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "我没有找到这个应用。"))
+        val manager = manager(
+            tts = FakeSpeechOutput(),
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("打开不存在的应用")),
+            screen = screen,
+            ai = ai,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "设置", packageName = "com.android.settings"),
+            ),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(1, screen.collectCount)
+        assertEquals(listOf("打开不存在的应用"), ai.utterances)
+    }
+
+    @Test
+    fun highRiskLocalOpenAppCommandWaitsForConfirmationBeforeExecuting() = runTest {
+        val tts = FakeSpeechOutput()
+        val actions = FakeActionRunner()
+        val responseAction = AssistantAction(type = "OPEN_APP", appPackage = "com.example.pay")
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("打开支付应用"),
+                SpeechInputResult.Recognized("确认执行"),
+            ),
+            actions = actions,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "支付应用", packageName = "com.example.pay"),
+            ),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(tts.spoken.any { it.contains("高风险操作") })
+        assertTrue(actions.executions.isEmpty())
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(listOf(responseAction), actions.executions.single().actions)
+        assertTrue(actions.executions.single().confirmed)
+    }
+
+    @Test
     fun clearClickActionExecutesWithoutConfirmation() = runTest {
         val actions = FakeActionRunner()
         val manager = manager(
@@ -390,6 +517,36 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun stopCommandWhileConfirmationPendingStopsContinuousListening() = runTest {
+        val tts = FakeSpeechOutput()
+        val speech = FakeSpeechInput(
+            SpeechInputResult.Recognized("发送这条消息"),
+            SpeechInputResult.Recognized("停止"),
+        )
+        val screen = FakeScreenContextProvider()
+        val actions = FakeActionRunner()
+        val response = AssistResponse(
+            spoken = "我会发送这条消息。",
+            actions = listOf(AssistantAction(type = "CLICK_NODE", nodeId = "node_send")),
+        )
+        val manager = manager(
+            tts = tts,
+            speech = speech,
+            screen = screen,
+            ai = FakeAssistantClient(response = response),
+            actions = actions,
+        )
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertFalse(manager.isContinuousListening)
+        assertTrue(tts.spoken.contains("已取消高风险操作。"))
+        assertTrue(tts.spoken.contains("已停止聆听。"))
+        assertTrue(actions.executions.isEmpty())
+    }
+
+    @Test
     fun highRiskTargetNodeTextWaitsForConfirmationBeforeExecuting() = runTest {
         val tts = FakeSpeechOutput()
         val speech = FakeSpeechInput(
@@ -479,6 +636,7 @@ class AssistantSessionManagerPhase2Test {
         screen: FakeScreenContextProvider = FakeScreenContextProvider(),
         ai: FakeAssistantClient = FakeAssistantClient(response = AssistResponse(spoken = "好的。")),
         actions: FakeActionRunner = FakeActionRunner(),
+        openAppCommandResolver: OpenAppCommandResolver? = null,
     ): AssistantSessionManager {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
@@ -489,6 +647,7 @@ class AssistantSessionManagerPhase2Test {
             screenContextProvider = screen,
             assistantClient = ai,
             actionRunner = actions,
+            openAppCommandResolver = openAppCommandResolver,
         )
     }
 }
@@ -624,3 +783,18 @@ private fun screenContext(
         nodes = nodes,
         screenshotBase64 = null,
     )
+
+private fun openAppResolver(
+    vararg apps: InstalledApp,
+    defaultBrowserPackage: String? = null,
+): OpenAppCommandResolver =
+    OpenAppCommandResolver(FakeAppCatalogProvider(apps.toList(), defaultBrowserPackage))
+
+private class FakeAppCatalogProvider(
+    private val apps: List<InstalledApp>,
+    private val defaultBrowserPackage: String?,
+) : AppCatalogProvider {
+    override fun installedApps(): List<InstalledApp> = apps
+
+    override fun defaultBrowserPackage(): String? = defaultBrowserPackage
+}

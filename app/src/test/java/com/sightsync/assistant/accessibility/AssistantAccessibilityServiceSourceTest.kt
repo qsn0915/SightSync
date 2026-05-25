@@ -37,6 +37,15 @@ class AssistantAccessibilityServiceSourceTest {
     }
 
     @Test
+    fun wiresLocalOpenAppResolverIntoSessionManager() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+
+        assertTrue(source.contains("PackageManagerAppCatalogProvider"))
+        assertTrue(source.contains("OpenAppCommandResolver"))
+        assertTrue(source.contains("openAppCommandResolver ="))
+    }
+
+    @Test
     fun v2SpeechAcceptanceChecklistDocumentsLongRunningManualChecks() {
         val source = File("../docs/v2-speech-acceptance.md")
 

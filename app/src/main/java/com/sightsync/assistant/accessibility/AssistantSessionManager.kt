@@ -2,6 +2,8 @@
 
 import com.sightsync.assistant.ai.AiProtocolValidator
 import com.sightsync.assistant.ai.AssistResponse
+import com.sightsync.assistant.apps.OpenAppCommandResolver
+import com.sightsync.assistant.apps.OpenAppCommandResult
 import com.sightsync.assistant.core.RiskClassifier
 import com.sightsync.assistant.core.ScreenContext
 import com.sightsync.assistant.core.ScreenContextProvider
@@ -24,6 +26,7 @@ class AssistantSessionManager(
     private val screenContextProvider: ScreenContextProvider,
     private val assistantClient: AssistantClient,
     private val actionRunner: ActionRunner,
+    private val openAppCommandResolver: OpenAppCommandResolver? = null,
     private val onContinuousListeningChanged: (Boolean) -> Unit = {},
 ) {
     private var activeJob: Job? = null
@@ -143,10 +146,6 @@ class AssistantSessionManager(
                 }
                 return TurnResult.Completed
             }
-            if (stopCommandEndsContinuousListening && isContinuousStopCommand(utterance)) {
-                return TurnResult.StopRequested
-            }
-
             val confirmedRequest = confirmationManager.consumeIfConfirmed(utterance)
             if (confirmedRequest != null) {
                 executeResponse(
@@ -159,9 +158,20 @@ class AssistantSessionManager(
             if (confirmationManager.hasPending) {
                 confirmationManager.clear()
                 if (confirmationManager.isCancellation(utterance)) {
+                    if (stopCommandEndsContinuousListening) {
+                        voiceTurnCoordinator.speakResult("已取消高风险操作。")
+                        return TurnResult.StopRequested
+                    }
                     voiceTurnCoordinator.speakResult("已取消高风险操作。")
                     return TurnResult.Completed
                 }
+            }
+            if (stopCommandEndsContinuousListening && isContinuousStopCommand(utterance)) {
+                return TurnResult.StopRequested
+            }
+
+            if (handleLocalOpenAppCommand(utterance)) {
+                return TurnResult.Completed
             }
 
             voiceTurnCoordinator.speakResult("正在查看当前屏幕。")
@@ -174,22 +184,7 @@ class AssistantSessionManager(
                 screenContext = screenContext,
             )
 
-            val validation = AiProtocolValidator.validate(response)
-            if (!validation.isValid) {
-                voiceTurnCoordinator.speakResult("AI 返回了不支持的动作，已拒绝执行。${validation.reason}")
-                return TurnResult.Completed
-            }
-
-            val risky = response.requiresConfirmation ||
-                RiskClassifier.requiresConfirmation(utterance, response.actions, screenContext)
-            if (risky && response.actions.isNotEmpty()) {
-                confirmationManager.store(response, screenContext)
-                voiceTurnCoordinator.speakResult("${response.spoken} 这是高风险操作，如需继续，请再次唤起并说确认执行。")
-                return TurnResult.Completed
-            }
-
-            executeResponse(response, confirmed = false, sourceScreen = screenContext)
-            TurnResult.Completed
+            processPlannedResponse(utterance, response, screenContext)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (timeout: InterruptedIOException) {
@@ -212,11 +207,53 @@ class AssistantSessionManager(
 
     private fun isContinuousStopCommand(utterance: String): Boolean {
         val normalized = utterance.trim()
-        return normalized in setOf("停止聆听", "停止监听", "暂停助手", "取消", "退出")
+        return normalized in setOf("停止", "停止聆听", "停止监听", "停止助手", "暂停助手", "取消", "退出")
     }
 
     private fun isNoSpeechFailure(message: String): Boolean =
         message == "我没有听清，请再说一次。"
+
+    private suspend fun handleLocalOpenAppCommand(utterance: String): Boolean {
+        val resolver = openAppCommandResolver ?: return false
+        return when (val result = resolver.resolve(utterance)) {
+            is OpenAppCommandResult.Resolved -> {
+                processPlannedResponse(utterance, result.response, localActionScreenContext())
+                true
+            }
+
+            is OpenAppCommandResult.Ambiguous -> {
+                voiceTurnCoordinator.speakResult(result.response.spoken)
+                true
+            }
+
+            OpenAppCommandResult.NoMatch,
+            OpenAppCommandResult.NotOpenAppCommand,
+            -> false
+        }
+    }
+
+    private suspend fun processPlannedResponse(
+        utterance: String,
+        response: AssistResponse,
+        screenContext: ScreenContext,
+    ): TurnResult {
+        val validation = AiProtocolValidator.validate(response)
+        if (!validation.isValid) {
+            voiceTurnCoordinator.speakResult("AI 返回了不支持的动作，已拒绝执行。${validation.reason}")
+            return TurnResult.Completed
+        }
+
+        val risky = response.requiresConfirmation ||
+            RiskClassifier.requiresConfirmation(utterance, response.actions, screenContext)
+        if (risky && response.actions.isNotEmpty()) {
+            confirmationManager.store(response, screenContext)
+            voiceTurnCoordinator.speakResult("${response.spoken} 这是高风险操作，如需继续，请再次唤起并说确认执行。")
+            return TurnResult.Completed
+        }
+
+        executeResponse(response, confirmed = false, sourceScreen = screenContext)
+        return TurnResult.Completed
+    }
 
     private suspend fun executeResponse(
         response: AssistResponse,
@@ -242,4 +279,12 @@ class AssistantSessionManager(
         Completed,
         StopRequested,
     }
+
+    private fun localActionScreenContext(): ScreenContext =
+        ScreenContext(
+            packageName = "",
+            activityName = null,
+            nodes = emptyList(),
+            screenshotBase64 = null,
+        )
 }

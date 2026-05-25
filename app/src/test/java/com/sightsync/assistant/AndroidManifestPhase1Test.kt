@@ -26,6 +26,26 @@ class AndroidManifestPhase1Test {
     }
 
     @Test
+    fun declaresLauncherQueryForLocalAppCatalogWithoutQueryAllPackages() {
+        val manifest = parseManifest()
+        val permissionNames = manifest.getElementsByTagName("uses-permission")
+            .asSequence()
+            .map { it.getAttributeNS(androidNamespace, "name") }
+            .toSet()
+        val queries = manifest.getElementsByTagName("queries").item(0) as? org.w3c.dom.Element
+        val queryActions = queries
+            ?.getElementsByTagName("action")
+            ?.asSequence()
+            ?.map { it.getAttributeNS(androidNamespace, "name") }
+            .orEmpty()
+            .toSet()
+
+        assertTrue(queryActions.contains("android.intent.action.MAIN"))
+        assertTrue(queryActions.contains("android.intent.action.VIEW"))
+        assertTrue(!permissionNames.contains("android.permission.QUERY_ALL_PACKAGES"))
+    }
+
+    @Test
     fun allowsCleartextOnlyForLocalDevelopmentProxy() {
         val application = parseManifest().getElementsByTagName("application").item(0) as org.w3c.dom.Element
 

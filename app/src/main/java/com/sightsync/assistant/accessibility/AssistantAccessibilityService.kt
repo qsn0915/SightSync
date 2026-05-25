@@ -14,6 +14,8 @@ import android.view.accessibility.AccessibilityEvent
 import com.sightsync.assistant.BuildConfig
 import com.sightsync.assistant.MainActivity
 import com.sightsync.assistant.ai.AiProxyClient
+import com.sightsync.assistant.apps.OpenAppCommandResolver
+import com.sightsync.assistant.apps.PackageManagerAppCatalogProvider
 import com.sightsync.assistant.core.ActionExecutor
 import com.sightsync.assistant.core.ScreenContextCollector
 import com.sightsync.assistant.speech.ProxySpeechInputController
@@ -58,6 +60,7 @@ class AssistantAccessibilityService : AccessibilityService() {
             screenContextProvider = ScreenContextCollector(this),
             assistantClient = aiProxyClient,
             actionRunner = ActionExecutor(this),
+            openAppCommandResolver = OpenAppCommandResolver(PackageManagerAppCatalogProvider(this)),
             onContinuousListeningChanged = { active ->
                 if (::overlayController.isInitialized) {
                     overlayController.setListening(active)

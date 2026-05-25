@@ -13,5 +13,7 @@ class PrivacyExplanationSourceTest {
         assertTrue(source.contains("当前屏幕文本"))
         assertTrue(source.contains("截图"))
         assertTrue(source.contains("AI 服务处理"))
+        assertTrue(source.contains("可启动应用名称"))
+        assertTrue(source.contains("不会上传应用列表"))
     }
 }
