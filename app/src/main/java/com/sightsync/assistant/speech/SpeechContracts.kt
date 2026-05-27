@@ -25,6 +25,8 @@ data class RecordedAudio(
     val mimeType: String,
 )
 
+class NoSpeechDetectedException : java.io.IOException("no valid speech detected")
+
 interface AudioRecorder {
     suspend fun recordOnce(): RecordedAudio
     fun cancel()

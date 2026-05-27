@@ -1,5 +1,6 @@
 ﻿package com.sightsync.assistant.accessibility
 
+import android.util.Log
 import com.sightsync.assistant.ai.AiProtocolValidator
 import com.sightsync.assistant.ai.AssistResponse
 import com.sightsync.assistant.apps.OpenAppCommandResolver
@@ -34,6 +35,7 @@ class AssistantSessionManager(
     private val confirmationManager = ConfirmationManager()
     private val sessionId = UUID.randomUUID().toString()
     private var voiceState: VoiceInteractionState = VoiceInteractionState.Idle
+    private var pendingOpenAppClarification = false
     private val voiceTurnCoordinator = VoiceTurnCoordinator(
         speechInput = speechInput,
         speechOutput = speechOutput,
@@ -106,6 +108,7 @@ class AssistantSessionManager(
         continuousJob = null
         onContinuousListeningChanged(false)
         confirmationManager.clear()
+        pendingOpenAppClarification = false
         voiceTurnCoordinator.cancelVoice()
         scope.launch {
             voiceTurnCoordinator.speakResult("已停止聆听。")
@@ -116,6 +119,7 @@ class AssistantSessionManager(
         activeJob?.cancel()
         activeJob = null
         confirmationManager.clear()
+        pendingOpenAppClarification = false
         voiceTurnCoordinator.cancelVoice()
         scope.launch {
             voiceTurnCoordinator.speakResult("已取消。")
@@ -146,8 +150,10 @@ class AssistantSessionManager(
                 }
                 return TurnResult.Completed
             }
+            debugLog("ASR utterance='$utterance'")
             val confirmedRequest = confirmationManager.consumeIfConfirmed(utterance)
             if (confirmedRequest != null) {
+                pendingOpenAppClarification = false
                 executeResponse(
                     response = confirmedRequest.response,
                     confirmed = true,
@@ -167,7 +173,13 @@ class AssistantSessionManager(
                 }
             }
             if (stopCommandEndsContinuousListening && isContinuousStopCommand(utterance)) {
+                pendingOpenAppClarification = false
                 return TurnResult.StopRequested
+            }
+            if (pendingOpenAppClarification && confirmationManager.isCancellation(utterance)) {
+                pendingOpenAppClarification = false
+                voiceTurnCoordinator.speakResult("已取消。")
+                return TurnResult.Completed
             }
 
             if (handleLocalOpenAppCommand(utterance)) {
@@ -215,20 +227,33 @@ class AssistantSessionManager(
 
     private suspend fun handleLocalOpenAppCommand(utterance: String): Boolean {
         val resolver = openAppCommandResolver ?: return false
-        return when (val result = resolver.resolve(utterance)) {
+        debugLog("Resolving local open-app command. pendingClarification=$pendingOpenAppClarification")
+        return when (val result = resolver.resolve(utterance, allowBareTarget = pendingOpenAppClarification)) {
             is OpenAppCommandResult.Resolved -> {
+                pendingOpenAppClarification = false
+                debugLog("Local open-app resolved. actions=${result.response.actions}")
                 processPlannedResponse(utterance, result.response, localActionScreenContext())
                 true
             }
 
             is OpenAppCommandResult.Ambiguous -> {
+                pendingOpenAppClarification = true
+                debugLog("Local open-app ambiguous.")
                 voiceTurnCoordinator.speakResult(result.response.spoken)
                 true
             }
 
-            OpenAppCommandResult.NoMatch,
-            OpenAppCommandResult.NotOpenAppCommand,
-            -> false
+            is OpenAppCommandResult.NoMatch -> {
+                pendingOpenAppClarification = false
+                debugLog("Local open-app no match. target=${result.target}")
+                voiceTurnCoordinator.speakResult(result.response.spoken)
+                true
+            }
+
+            OpenAppCommandResult.NotOpenAppCommand -> {
+                debugLog("Not a local open-app command.")
+                false
+            }
         }
     }
 
@@ -287,4 +312,12 @@ class AssistantSessionManager(
             nodes = emptyList(),
             screenshotBase64 = null,
         )
+
+    private fun debugLog(message: String) {
+        runCatching { Log.d(TAG, message) }
+    }
+
+    private companion object {
+        const val TAG = "SightSyncSession"
+    }
 }

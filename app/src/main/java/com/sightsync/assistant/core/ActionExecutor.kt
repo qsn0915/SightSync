@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.graphics.Rect
 import android.os.Bundle
+import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import com.sightsync.assistant.accessibility.ActionRunner
 import com.sightsync.assistant.ai.AssistantAction
@@ -14,7 +15,35 @@ data class ActionResult(
     val requiresScreenRefresh: Boolean = false,
 )
 
-class ActionExecutor(private val service: AccessibilityService) : ActionRunner {
+sealed interface AppLaunchResult {
+    data object Succeeded : AppLaunchResult
+    data object NoLaunchIntent : AppLaunchResult
+    data class Failed(val reason: String) : AppLaunchResult
+}
+
+interface AppLauncher {
+    fun launch(packageName: String): AppLaunchResult
+}
+
+private class AccessibilityAppLauncher(
+    private val service: AccessibilityService,
+) : AppLauncher {
+    override fun launch(packageName: String): AppLaunchResult {
+        val intent = service.packageManager.getLaunchIntentForPackage(packageName)
+            ?: return AppLaunchResult.NoLaunchIntent
+        return runCatching {
+            service.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.fold(
+            onSuccess = { AppLaunchResult.Succeeded },
+            onFailure = { AppLaunchResult.Failed(it.message ?: it::class.java.simpleName) },
+        )
+    }
+}
+
+class ActionExecutor(
+    private val service: AccessibilityService? = null,
+    private val appLauncher: AppLauncher = AccessibilityAppLauncher(requireNotNull(service)),
+) : ActionRunner {
     override fun execute(
         actions: List<AssistantAction>,
         confirmed: Boolean,
@@ -62,21 +91,36 @@ class ActionExecutor(private val service: AccessibilityService) : ActionRunner {
     }
 
     private fun scroll(action: Int): ActionResult {
-        val root = service.rootInActiveWindow ?: return ActionResult(false, "无法读取当前页面。")
+        val activeService = service ?: return ActionResult(false, "无障碍服务不可用。")
+        val root = activeService.rootInActiveWindow ?: return ActionResult(false, "无法读取当前页面。")
         val scrollable = findFirst(root) { it.isScrollable }
         val success = scrollable?.performAction(action) == true
         return if (success) ActionResult(true, "已滚动。") else ActionResult(false, "当前页面不能继续滚动。")
     }
 
-    private fun global(action: Int, message: String): ActionResult =
-        if (service.performGlobalAction(action)) ActionResult(true, message) else ActionResult(false, "系统动作执行失败。")
+    private fun global(action: Int, message: String): ActionResult {
+        val activeService = service ?: return ActionResult(false, "无障碍服务不可用。")
+        return if (activeService.performGlobalAction(action)) ActionResult(true, message) else ActionResult(false, "系统动作执行失败。")
+    }
 
     private fun openApp(packageName: String?): ActionResult {
         if (packageName.isNullOrBlank()) return ActionResult(false, "缺少应用包名。")
-        val intent = service.packageManager.getLaunchIntentForPackage(packageName)
-            ?: return ActionResult(false, "找不到这个应用。")
-        service.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        return ActionResult(true, "已打开应用。")
+        return when (val result = appLauncher.launch(packageName)) {
+            AppLaunchResult.Succeeded -> {
+                debugLog("OPEN_APP succeeded. package=$packageName")
+                ActionResult(true, "已打开应用。")
+            }
+
+            AppLaunchResult.NoLaunchIntent -> {
+                debugLog("OPEN_APP failed: no launch intent. package=$packageName")
+                ActionResult(false, "找不到这个应用的可启动入口。")
+            }
+
+            is AppLaunchResult.Failed -> {
+                debugLog("OPEN_APP failed. package=$packageName reason=${result.reason}")
+                ActionResult(false, "打开应用失败：${result.reason}")
+            }
+        }
     }
 
     private fun findCurrentNode(
@@ -86,7 +130,8 @@ class ActionExecutor(private val service: AccessibilityService) : ActionRunner {
     ): NodeLookup {
         if (nodeId.isNullOrBlank()) return NodeLookup(failure = pageChanged())
         val targetIndex = nodeId.removePrefix("node_").toIntOrNull() ?: return NodeLookup(failure = pageChanged())
-        val root = service.rootInActiveWindow ?: return NodeLookup(failure = ActionResult(false, "无法读取当前页面。"))
+        val activeService = service ?: return NodeLookup(failure = ActionResult(false, "无障碍服务不可用。"))
+        val root = activeService.rootInActiveWindow ?: return NodeLookup(failure = ActionResult(false, "无法读取当前页面。"))
         val currentPackage = root.packageName?.toString().orEmpty()
         if (sourceScreen.packageName.isNotBlank() && currentPackage != sourceScreen.packageName) {
             return NodeLookup(failure = pageChanged())
@@ -147,8 +192,16 @@ class ActionExecutor(private val service: AccessibilityService) : ActionRunner {
             requiresScreenRefresh = true,
         )
 
+    private fun debugLog(message: String) {
+        runCatching { Log.d(TAG, message) }
+    }
+
     private data class NodeLookup(
         val node: AccessibilityNodeInfo? = null,
         val failure: ActionResult? = null,
     )
+
+    private companion object {
+        const val TAG = "SightSyncAction"
+    }
 }

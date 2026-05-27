@@ -39,6 +39,41 @@ class OpenAppCommandResolverTest {
     }
 
     @Test
+    fun resolvesGoogleBrowserAliasesToBrowser() {
+        val resolver = resolver(
+            InstalledApp(label = "Chrome", packageName = "com.android.chrome"),
+            defaultBrowserPackage = "com.android.chrome",
+        )
+
+        val aliases = listOf(
+            "帮我打开谷歌浏览器",
+            "打开 Google Chrome",
+            "启动 Chrome 浏览器",
+            "进入 google",
+        )
+
+        aliases.forEach { utterance ->
+            val result = resolver.resolve(utterance)
+
+            val resolved = result as OpenAppCommandResult.Resolved
+            assertEquals("com.android.chrome", resolved.response.actions.single().appPackage)
+        }
+    }
+
+    @Test
+    fun resolvesBareTargetWhenClarificationIsPending() {
+        val resolver = resolver(
+            InstalledApp(label = "Chrome", packageName = "com.android.chrome"),
+            defaultBrowserPackage = "com.android.chrome",
+        )
+
+        val result = resolver.resolve("谷歌浏览器", allowBareTarget = true)
+
+        val resolved = result as OpenAppCommandResult.Resolved
+        assertEquals("com.android.chrome", resolved.response.actions.single().appPackage)
+    }
+
+    @Test
     fun asksWhenMultipleAppsMatch() {
         val resolver = resolver(
             InstalledApp(label = "微信", packageName = "com.tencent.mm"),
@@ -53,12 +88,17 @@ class OpenAppCommandResolverTest {
     }
 
     @Test
-    fun returnsNoMatchSoExistingAiFlowCanHandleIt() {
+    fun returnsNoMatchWithLocalFailureForExplicitOpenCommand() {
         val resolver = resolver(
             InstalledApp(label = "设置", packageName = "com.android.settings"),
         )
 
-        assertEquals(OpenAppCommandResult.NoMatch, resolver.resolve("打开不存在的应用"))
+        val result = resolver.resolve("打开不存在的应用")
+
+        val noMatch = result as OpenAppCommandResult.NoMatch
+        assertEquals("不存在的应用", noMatch.target)
+        assertEquals("没有找到不存在的应用。", noMatch.response.spoken)
+        assertTrue(noMatch.response.actions.isEmpty())
     }
 
     @Test

@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder.AudioSource
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -48,17 +49,23 @@ class ShortAudioRecorder(
                 maxDurationMillis = maxDurationMillis,
             )
             val startedAt = System.currentTimeMillis()
+            var peakAmplitude = 0
+            var stoppedAt = 0L
             do {
                 val read = activeRecorder.read(frame, 0, frame.size)
                 val elapsed = System.currentTimeMillis() - startedAt
+                stoppedAt = elapsed
                 val amplitude = if (read > 0) {
                     sampleBuffer.append(frame, read)
                     PcmFrameEnergy.maxAmplitude(frame, read)
                 } else {
                     0
                 }
+                if (amplitude > peakAmplitude) peakAmplitude = amplitude
             } while (!detector.shouldStop(amplitude, elapsed))
             stopRecorder(activeRecorder)
+            debugLog("recorded duration=${stoppedAt}ms peakAmplitude=$peakAmplitude heardSpeech=${detector.heardSpeech}")
+            if (!detector.heardSpeech) throw NoSpeechDetectedException()
             val samples = sampleBuffer.toShortArray()
             if (samples.isEmpty()) throw IOException("recorded audio is empty")
             RecordedAudio(
@@ -91,7 +98,12 @@ class ShortAudioRecorder(
         runCatching { activeRecorder.release() }
     }
 
+    private fun debugLog(message: String) {
+        runCatching { Log.d(TAG, message) }
+    }
+
     private companion object {
         const val BYTES_PER_SAMPLE = 2
+        const val TAG = "SightSyncRecorder"
     }
 }

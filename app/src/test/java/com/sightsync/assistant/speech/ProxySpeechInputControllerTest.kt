@@ -35,6 +35,20 @@ class ProxySpeechInputControllerTest {
     }
 
     @Test
+    fun noDetectedSpeechDoesNotCallTranscription() = runTest {
+        val client = FakeTranscriptionClient("不应调用")
+        val speechInput = ProxySpeechInputController(
+            FakeAudioRecorder(error = NoSpeechDetectedException()),
+            client,
+        )
+
+        val result = speechInput.listenOnce()
+
+        assertEquals(SpeechInputResult.Failed("我没有听清，请再说一次。"), result)
+        assertEquals(null, client.lastAudio)
+    }
+
+    @Test
     fun networkFailureUsesClearVoicePrompt() = runTest {
         val speechInput = ProxySpeechInputController(
             FakeAudioRecorder(RecordedAudio(byteArrayOf(1), "audio/mp4")),
@@ -70,11 +84,15 @@ class ProxySpeechInputControllerTest {
 }
 
 private class FakeAudioRecorder(
-    private val audio: RecordedAudio,
+    private val audio: RecordedAudio? = null,
+    private val error: Throwable? = null,
 ) : AudioRecorder {
     var cancelled = false
 
-    override suspend fun recordOnce(): RecordedAudio = audio
+    override suspend fun recordOnce(): RecordedAudio {
+        error?.let { throw it }
+        return requireNotNull(audio)
+    }
 
     override fun cancel() {
         cancelled = true

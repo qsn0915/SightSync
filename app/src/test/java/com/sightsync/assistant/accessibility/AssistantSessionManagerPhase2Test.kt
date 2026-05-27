@@ -357,11 +357,12 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
-    fun unmatchedLocalOpenAppCommandFallsBackToExistingAiFlow() = runTest {
+    fun unmatchedExplicitLocalOpenAppCommandSpeaksFailureWithoutCallingAi() = runTest {
+        val tts = FakeSpeechOutput()
         val screen = FakeScreenContextProvider()
         val ai = FakeAssistantClient(response = AssistResponse(spoken = "我没有找到这个应用。"))
         val manager = manager(
-            tts = FakeSpeechOutput(),
+            tts = tts,
             speech = FakeSpeechInput(SpeechInputResult.Recognized("打开不存在的应用")),
             screen = screen,
             ai = ai,
@@ -373,8 +374,80 @@ class AssistantSessionManagerPhase2Test {
         manager.onAssistantRequested()
         advanceUntilIdle()
 
-        assertEquals(1, screen.collectCount)
-        assertEquals(listOf("打开不存在的应用"), ai.utterances)
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertTrue(tts.spoken.contains("没有找到不存在的应用。"))
+    }
+
+    @Test
+    fun ambiguousOpenAppCommandAcceptsBareTargetOnNextTurn() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = FakeActionRunner()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("打开浏览器"),
+                SpeechInputResult.Recognized("谷歌浏览器"),
+            ),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "Chrome", packageName = "com.android.chrome"),
+                InstalledApp(label = "Edge", packageName = "com.microsoft.emmx"),
+            ),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(tts.spoken.any { it.contains("我找到了多个应用") })
+        assertTrue(actions.executions.isEmpty())
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertEquals(
+            listOf(AssistantAction(type = "OPEN_APP", appPackage = "com.android.chrome")),
+            actions.executions.single().actions,
+        )
+    }
+
+    @Test
+    fun cancelClearsPendingOpenAppClarificationWithoutCallingAi() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = FakeActionRunner()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("打开浏览器"),
+                SpeechInputResult.Recognized("取消"),
+            ),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "Chrome", packageName = "com.android.chrome"),
+                InstalledApp(label = "Edge", packageName = "com.microsoft.emmx"),
+            ),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertTrue(actions.executions.isEmpty())
+        assertTrue(tts.spoken.contains("已取消。"))
     }
 
     @Test

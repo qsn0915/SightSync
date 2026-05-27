@@ -21,6 +21,8 @@ class ProxySpeechInputController(
             SpeechInputResult.Failed("麦克风权限未开启，请先在应用首页开启。")
         } catch (_: InterruptedIOException) {
             SpeechInputResult.Failed("语音转写请求超时，请稍后重试。")
+        } catch (_: NoSpeechDetectedException) {
+            SpeechInputResult.Failed("我没有听清，请再说一次。")
         } catch (error: IOException) {
             if (error.isTranscriptionServiceUnavailable()) {
                 SpeechInputResult.Failed("语音转写服务暂时不可用，请稍后重试。")
