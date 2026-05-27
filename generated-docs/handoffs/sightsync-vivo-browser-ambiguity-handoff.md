@@ -13,7 +13,7 @@
 
 日志文件：
 
-- `sightsync-realdevice-acceptance-utf8-decoded-20260527-175503.txt`
+- `generated-docs/logs/sightsync-realdevice-acceptance-utf8-decoded-20260527-175503.txt`
 
 关键日志：
 
