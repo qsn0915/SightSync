@@ -35,7 +35,7 @@ class AssistantSessionManager(
     private val confirmationManager = ConfirmationManager()
     private val sessionId = UUID.randomUUID().toString()
     private var voiceState: VoiceInteractionState = VoiceInteractionState.Idle
-    private var pendingOpenAppClarification = false
+    private var pendingOpenAppCandidatePackages: Set<String> = emptySet()
     private val voiceTurnCoordinator = VoiceTurnCoordinator(
         speechInput = speechInput,
         speechOutput = speechOutput,
@@ -108,7 +108,7 @@ class AssistantSessionManager(
         continuousJob = null
         onContinuousListeningChanged(false)
         confirmationManager.clear()
-        pendingOpenAppClarification = false
+        pendingOpenAppCandidatePackages = emptySet()
         voiceTurnCoordinator.cancelVoice()
         scope.launch {
             voiceTurnCoordinator.speakResult("已停止聆听。")
@@ -119,7 +119,7 @@ class AssistantSessionManager(
         activeJob?.cancel()
         activeJob = null
         confirmationManager.clear()
-        pendingOpenAppClarification = false
+        pendingOpenAppCandidatePackages = emptySet()
         voiceTurnCoordinator.cancelVoice()
         scope.launch {
             voiceTurnCoordinator.speakResult("已取消。")
@@ -153,7 +153,7 @@ class AssistantSessionManager(
             debugLog("ASR utterance='$utterance'")
             val confirmedRequest = confirmationManager.consumeIfConfirmed(utterance)
             if (confirmedRequest != null) {
-                pendingOpenAppClarification = false
+                pendingOpenAppCandidatePackages = emptySet()
                 executeResponse(
                     response = confirmedRequest.response,
                     confirmed = true,
@@ -173,11 +173,11 @@ class AssistantSessionManager(
                 }
             }
             if (stopCommandEndsContinuousListening && isContinuousStopCommand(utterance)) {
-                pendingOpenAppClarification = false
+                pendingOpenAppCandidatePackages = emptySet()
                 return TurnResult.StopRequested
             }
-            if (pendingOpenAppClarification && confirmationManager.isCancellation(utterance)) {
-                pendingOpenAppClarification = false
+            if (pendingOpenAppCandidatePackages.isNotEmpty() && confirmationManager.isCancellation(utterance)) {
+                pendingOpenAppCandidatePackages = emptySet()
                 voiceTurnCoordinator.speakResult("已取消。")
                 return TurnResult.Completed
             }
@@ -227,24 +227,29 @@ class AssistantSessionManager(
 
     private suspend fun handleLocalOpenAppCommand(utterance: String): Boolean {
         val resolver = openAppCommandResolver ?: return false
-        debugLog("Resolving local open-app command. pendingClarification=$pendingOpenAppClarification")
-        return when (val result = resolver.resolve(utterance, allowBareTarget = pendingOpenAppClarification)) {
+        val pendingCandidates = pendingOpenAppCandidatePackages
+        debugLog("Resolving local open-app command. pendingCandidates=${pendingCandidates.size}")
+        return when (val result = resolver.resolve(
+            utterance = utterance,
+            allowBareTarget = pendingCandidates.isNotEmpty(),
+            candidatePackages = pendingCandidates.takeIf { it.isNotEmpty() },
+        )) {
             is OpenAppCommandResult.Resolved -> {
-                pendingOpenAppClarification = false
+                pendingOpenAppCandidatePackages = emptySet()
                 debugLog("Local open-app resolved. actions=${result.response.actions}")
                 processPlannedResponse(utterance, result.response, localActionScreenContext())
                 true
             }
 
             is OpenAppCommandResult.Ambiguous -> {
-                pendingOpenAppClarification = true
-                debugLog("Local open-app ambiguous.")
+                pendingOpenAppCandidatePackages = result.candidatePackages
+                debugLog("Local open-app ambiguous. candidates=${result.candidatePackages}")
                 voiceTurnCoordinator.speakResult(result.response.spoken)
                 true
             }
 
             is OpenAppCommandResult.NoMatch -> {
-                pendingOpenAppClarification = false
+                pendingOpenAppCandidatePackages = emptySet()
                 debugLog("Local open-app no match. target=${result.target}")
                 voiceTurnCoordinator.speakResult(result.response.spoken)
                 true

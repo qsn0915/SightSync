@@ -74,10 +74,10 @@ class OpenAppCommandResolverTest {
     }
 
     @Test
-    fun asksWhenMultipleAppsMatch() {
+    fun asksWhenMultipleVariantAppsMatch() {
         val resolver = resolver(
-            InstalledApp(label = "微信", packageName = "com.tencent.mm"),
-            InstalledApp(label = "企业微信", packageName = "com.tencent.wework"),
+            InstalledApp(label = "微信内测版", packageName = "com.tencent.mm.beta"),
+            InstalledApp(label = "微信测试版", packageName = "com.tencent.mm.test"),
         )
 
         val result = resolver.resolve("启动微信")
@@ -85,6 +85,80 @@ class OpenAppCommandResolverTest {
         val ambiguous = result as OpenAppCommandResult.Ambiguous
         assertTrue(ambiguous.response.spoken.contains("我找到了多个"))
         assertTrue(ambiguous.response.actions.isEmpty())
+    }
+
+    @Test
+    fun exactShortNameWinsOverLongerContainingName() {
+        val resolver = resolver(
+            InstalledApp(label = "QQ", packageName = "com.tencent.mobileqq"),
+            InstalledApp(label = "QQ邮箱内测版", packageName = "com.tencent.qqmail.beta"),
+        )
+
+        val result = resolver.resolve("打开QQ")
+
+        val resolved = result as OpenAppCommandResult.Resolved
+        assertEquals("com.tencent.mobileqq", resolved.response.actions.single().appPackage)
+    }
+
+    @Test
+    fun exactFormalNameWinsOverVariantName() {
+        val resolver = resolver(
+            InstalledApp(label = "QQ", packageName = "com.tencent.mobileqq"),
+            InstalledApp(label = "QQ邮箱", packageName = "com.tencent.qqmail"),
+            InstalledApp(label = "QQ邮箱内测版", packageName = "com.tencent.qqmail.beta"),
+        )
+
+        val result = resolver.resolve("打开QQ邮箱")
+
+        val resolved = result as OpenAppCommandResult.Resolved
+        assertEquals("com.tencent.qqmail", resolved.response.actions.single().appPackage)
+    }
+
+    @Test
+    fun variantNameWinsWhenFormalNameIsNotInstalled() {
+        val resolver = resolver(
+            InstalledApp(label = "QQ", packageName = "com.tencent.mobileqq"),
+            InstalledApp(label = "QQ邮箱内测版", packageName = "com.tencent.qqmail.beta"),
+        )
+
+        val result = resolver.resolve("打开QQ邮箱")
+
+        val resolved = result as OpenAppCommandResult.Resolved
+        assertEquals("com.tencent.qqmail.beta", resolved.response.actions.single().appPackage)
+    }
+
+    @Test
+    fun multipleVariantsRemainAmbiguous() {
+        val resolver = resolver(
+            InstalledApp(label = "QQ邮箱内测版", packageName = "com.tencent.qqmail.beta"),
+            InstalledApp(label = "QQ邮箱测试版", packageName = "com.tencent.qqmail.test"),
+        )
+
+        val result = resolver.resolve("打开QQ邮箱")
+
+        val ambiguous = result as OpenAppCommandResult.Ambiguous
+        assertEquals(
+            setOf("com.tencent.qqmail.beta", "com.tencent.qqmail.test"),
+            ambiguous.candidatePackages,
+        )
+    }
+
+    @Test
+    fun candidatePackageScopeLimitsBareTargetClarification() {
+        val resolver = resolver(
+            InstalledApp(label = "QQ", packageName = "com.tencent.mobileqq"),
+            InstalledApp(label = "QQ邮箱内测版", packageName = "com.tencent.qqmail.beta"),
+            InstalledApp(label = "网易邮箱", packageName = "com.netease.mail"),
+        )
+
+        val result = resolver.resolve(
+            utterance = "QQ邮箱内测版",
+            allowBareTarget = true,
+            candidatePackages = setOf("com.tencent.qqmail.beta", "com.netease.mail"),
+        )
+
+        val resolved = result as OpenAppCommandResult.Resolved
+        assertEquals("com.tencent.qqmail.beta", resolved.response.actions.single().appPackage)
     }
 
     @Test

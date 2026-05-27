@@ -337,13 +337,13 @@ class AssistantSessionManagerPhase2Test {
         val actions = FakeActionRunner()
         val manager = manager(
             tts = tts,
-            speech = FakeSpeechInput(SpeechInputResult.Recognized("打开微信")),
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("打开邮箱")),
             screen = screen,
             ai = ai,
             actions = actions,
             openAppCommandResolver = openAppResolver(
-                InstalledApp(label = "微信", packageName = "com.tencent.mm"),
-                InstalledApp(label = "企业微信", packageName = "com.tencent.wework"),
+                InstalledApp(label = "QQ邮箱内测版", packageName = "com.tencent.qqmail.beta"),
+                InstalledApp(label = "网易邮箱", packageName = "com.netease.mail"),
             ),
         )
 
@@ -413,6 +413,45 @@ class AssistantSessionManagerPhase2Test {
         assertTrue(ai.utterances.isEmpty())
         assertEquals(
             listOf(AssistantAction(type = "OPEN_APP", appPackage = "com.android.chrome")),
+            actions.executions.single().actions,
+        )
+    }
+
+    @Test
+    fun ambiguousOpenAppCommandLimitsNextBareTargetToPreviousCandidates() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = FakeActionRunner()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("打开邮箱"),
+                SpeechInputResult.Recognized("QQ邮箱内测版"),
+            ),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "QQ", packageName = "com.tencent.mobileqq"),
+                InstalledApp(label = "QQ邮箱内测版", packageName = "com.tencent.qqmail.beta"),
+                InstalledApp(label = "网易邮箱", packageName = "com.netease.mail"),
+            ),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(tts.spoken.any { it.contains("我找到了多个应用") })
+        assertTrue(actions.executions.isEmpty())
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertEquals(
+            listOf(AssistantAction(type = "OPEN_APP", appPackage = "com.tencent.qqmail.beta")),
             actions.executions.single().actions,
         )
     }

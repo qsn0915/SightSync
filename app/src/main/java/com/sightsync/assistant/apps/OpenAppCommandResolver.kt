@@ -6,22 +6,31 @@ import com.sightsync.assistant.ai.AssistResponse
 class OpenAppCommandResolver(
     private val appCatalogProvider: AppCatalogProvider,
 ) {
-    fun resolve(utterance: String, allowBareTarget: Boolean = false): OpenAppCommandResult {
+    fun resolve(
+        utterance: String,
+        allowBareTarget: Boolean = false,
+        candidatePackages: Set<String>? = null,
+    ): OpenAppCommandResult {
         val target = parseOpenAppTarget(utterance, allowBareTarget) ?: return OpenAppCommandResult.NotOpenAppCommand
         val normalizedTarget = normalizeAppName(target)
         if (normalizedTarget.isBlank()) return OpenAppCommandResult.NotOpenAppCommand
 
         val apps = appCatalogProvider.installedApps()
+            .filter { app -> candidatePackages == null || app.packageName in candidatePackages }
         val browserMatch = browserMatch(normalizedTarget, apps)
         if (browserMatch != null) return resolved(browserMatch)
 
-        val matches = apps.filter { app ->
-            app.normalizedNames.any { name ->
-                name == normalizedTarget ||
-                    name.contains(normalizedTarget) ||
-                    normalizedTarget.contains(name)
-            }
+        val rankedMatches = apps.mapNotNull { app ->
+            val score = app.normalizedNames
+                .mapNotNull { name -> matchScore(name, normalizedTarget) }
+                .maxOrNull()
+                ?: return@mapNotNull null
+            AppMatch(app, score)
         }
+        val bestScore = rankedMatches.maxOfOrNull { it.score }
+        val matches = rankedMatches
+            .filter { it.score == bestScore }
+            .map { it.app }
 
         return when (matches.size) {
             0 -> noMatch(target)
@@ -29,6 +38,15 @@ class OpenAppCommandResolver(
             else -> ambiguous(matches)
         }
     }
+
+    private fun matchScore(normalizedName: String, normalizedTarget: String): Int? =
+        when {
+            normalizedName == normalizedTarget -> 100
+            normalizedName.startsWith(normalizedTarget) -> 90
+            normalizedTarget.startsWith(normalizedName) -> 70
+            normalizedName.contains(normalizedTarget) || normalizedTarget.contains(normalizedName) -> 50
+            else -> null
+        }
 
     private fun browserMatch(normalizedTarget: String, apps: List<InstalledApp>): InstalledApp? {
         if (normalizedTarget !in browserNames) return null
@@ -76,11 +94,12 @@ class OpenAppCommandResolver(
     private fun ambiguous(apps: List<InstalledApp>): OpenAppCommandResult.Ambiguous {
         val labels = apps.joinToString("、") { it.label }
         return OpenAppCommandResult.Ambiguous(
-            AssistResponse(
+            response = AssistResponse(
                 spoken = "我找到了多个应用：$labels。请说得更具体。",
                 requiresConfirmation = false,
                 actions = emptyList(),
             ),
+            candidatePackages = apps.map { it.packageName }.toSet(),
         )
     }
 
@@ -115,11 +134,19 @@ class OpenAppCommandResolver(
         )
         val openAppPattern = Regex("""^(?:请|麻烦你|帮我|你帮我)?\s*(?:打开|启动|开启|进入)\s*(.+)$""")
     }
+
+    private data class AppMatch(
+        val app: InstalledApp,
+        val score: Int,
+    )
 }
 
 sealed interface OpenAppCommandResult {
     data class Resolved(val response: AssistResponse) : OpenAppCommandResult
-    data class Ambiguous(val response: AssistResponse) : OpenAppCommandResult
+    data class Ambiguous(
+        val response: AssistResponse,
+        val candidatePackages: Set<String>,
+    ) : OpenAppCommandResult
     data class NoMatch(val target: String, val response: AssistResponse) : OpenAppCommandResult
     data object NotOpenAppCommand : OpenAppCommandResult
 }
