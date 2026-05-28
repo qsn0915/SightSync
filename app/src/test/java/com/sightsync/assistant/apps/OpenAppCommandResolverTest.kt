@@ -196,6 +196,69 @@ class OpenAppCommandResolverTest {
         assertEquals("com.android.chrome", resolved.response.actions.single().appPackage)
     }
 
+    @Test
+    fun brandedBrowserTargetUsesPackageBrandWhenLauncherLabelIsGeneric() {
+        val resolver = resolver(
+            InstalledApp(label = "浏览器", packageName = "com.quark.browser"),
+            InstalledApp(label = "浏览器", packageName = "com.vivo.browser"),
+            defaultBrowserPackage = "com.quark.browser",
+        )
+
+        val result = resolver.resolve("打开vivo浏览器")
+
+        val resolved = result as OpenAppCommandResult.Resolved
+        assertEquals("com.vivo.browser", resolved.response.actions.single().appPackage)
+    }
+
+    @Test
+    fun brandedBrowserBareTargetUsesPackageBrandWithinClarificationCandidates() {
+        val resolver = resolver(
+            InstalledApp(label = "浏览器", packageName = "com.quark.browser"),
+            InstalledApp(label = "浏览器", packageName = "com.vivo.browser"),
+            defaultBrowserPackage = "com.quark.browser",
+        )
+
+        val result = resolver.resolve(
+            utterance = "Vivo浏览器",
+            allowBareTarget = true,
+            candidatePackages = setOf("com.quark.browser", "com.vivo.browser"),
+        )
+
+        val resolved = result as OpenAppCommandResult.Resolved
+        assertEquals("com.vivo.browser", resolved.response.actions.single().appPackage)
+    }
+
+    @Test
+    fun chineseBrandedBrowserTargetUsesPackageBrandWhenLauncherLabelIsGeneric() {
+        val resolver = resolver(
+            InstalledApp(label = "浏览器", packageName = "com.quark.browser"),
+            InstalledApp(label = "浏览器", packageName = "com.vivo.browser"),
+        )
+
+        val result = resolver.resolve("打开夸克浏览器")
+
+        val resolved = result as OpenAppCommandResult.Resolved
+        assertEquals("com.quark.browser", resolved.response.actions.single().appPackage)
+    }
+
+    @Test
+    fun missingBrandedBrowserSuggestsLocalBrowserAlternativesInsteadOfOpeningDefault() {
+        val resolver = resolver(
+            InstalledApp(label = "浏览器", packageName = "com.vivo.browser"),
+            InstalledApp(label = "夸克", packageName = "com.quark.browser"),
+            defaultBrowserPackage = "com.vivo.browser",
+        )
+
+        val result = resolver.resolve("打开谷歌浏览器")
+
+        val alternatives = result as OpenAppCommandResult.Alternatives
+        assertEquals("谷歌浏览器", alternatives.target)
+        assertEquals(setOf("com.vivo.browser", "com.quark.browser"), alternatives.candidatePackages)
+        assertTrue(alternatives.response.spoken.contains("没有找到谷歌浏览器"))
+        assertTrue(alternatives.response.spoken.contains("要打开"))
+        assertTrue(alternatives.response.actions.isEmpty())
+    }
+
     private fun resolver(
         vararg apps: InstalledApp,
         defaultBrowserPackage: String? = null,

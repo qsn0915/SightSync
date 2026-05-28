@@ -248,6 +248,13 @@ class AssistantSessionManager(
                 true
             }
 
+            is OpenAppCommandResult.Alternatives -> {
+                pendingOpenAppCandidatePackages = result.candidatePackages
+                debugLog("Local open-app alternatives. target=${result.target} candidates=${result.candidatePackages}")
+                voiceTurnCoordinator.speakResult(result.response.spoken)
+                true
+            }
+
             is OpenAppCommandResult.NoMatch -> {
                 pendingOpenAppCandidatePackages = emptySet()
                 debugLog("Local open-app no match. target=${result.target}")

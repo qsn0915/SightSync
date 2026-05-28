@@ -380,6 +380,71 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun missingBrandedBrowserAsksForLocalAlternativesWithoutCallingAi() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = FakeActionRunner()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("打开谷歌浏览器")),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "浏览器", packageName = "com.vivo.browser"),
+                InstalledApp(label = "夸克", packageName = "com.quark.browser"),
+                defaultBrowserPackage = "com.vivo.browser",
+            ),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertTrue(actions.executions.isEmpty())
+        assertTrue(tts.spoken.any { it.contains("没有找到谷歌浏览器") })
+        assertTrue(tts.spoken.any { it.contains("要打开") })
+    }
+
+    @Test
+    fun missingBrandedBrowserAcceptsDefaultBrowserOnNextTurn() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = FakeActionRunner()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("打开谷歌浏览器"),
+                SpeechInputResult.Recognized("默认浏览器"),
+            ),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "浏览器", packageName = "com.vivo.browser"),
+                InstalledApp(label = "夸克", packageName = "com.quark.browser"),
+                defaultBrowserPackage = "com.vivo.browser",
+            ),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertEquals(
+            listOf(AssistantAction(type = "OPEN_APP", appPackage = "com.vivo.browser")),
+            actions.executions.single().actions,
+        )
+    }
+
+    @Test
     fun ambiguousOpenAppCommandAcceptsBareTargetOnNextTurn() = runTest {
         val tts = FakeSpeechOutput()
         val screen = FakeScreenContextProvider()

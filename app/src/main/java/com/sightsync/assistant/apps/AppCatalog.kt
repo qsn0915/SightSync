@@ -58,6 +58,7 @@ private fun buildNormalizedNames(label: String, packageName: String): Set<String
     if (isBrowserLike(label, packageName)) {
         names += "浏览器"
         names += "browser"
+        names += browserBrandNames(label, packageName)
     }
 
     return names.filter { it.isNotBlank() }.toSet()
@@ -76,3 +77,32 @@ private fun isBrowserLike(label: String, packageName: String): Boolean {
         "浏览器",
     ).any(value::contains)
 }
+
+private fun browserBrandNames(label: String, packageName: String): Set<String> {
+    val value = "${label.lowercase()} ${packageName.lowercase()}"
+    return browserBrandAliases
+        .filterKeys(value::contains)
+        .values
+        .flatten()
+        .flatMap { alias ->
+            listOf(
+                alias,
+                "$alias 浏览器",
+                "${alias}browser",
+            )
+        }
+        .map(::normalizeAppName)
+        .filter { it.isNotBlank() }
+        .toSet()
+}
+
+private val browserBrandAliases = mapOf(
+    "chrome" to listOf("chrome", "google", "google chrome", "谷歌"),
+    "google" to listOf("google", "google chrome", "谷歌"),
+    "vivo" to listOf("vivo"),
+    "quark" to listOf("quark", "夸克"),
+    "edge" to listOf("edge", "microsoft edge", "微软 edge"),
+    "emmx" to listOf("edge", "microsoft edge", "微软 edge"),
+    "firefox" to listOf("firefox", "火狐"),
+    "ucmobile" to listOf("uc", "uc 浏览器"),
+)
