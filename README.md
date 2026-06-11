@@ -52,7 +52,7 @@ npm start
 Defaults:
 
 - `QWEN_BASE_URL`: `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions`
-- `QWEN_MODEL`: `qwen3.6-plus`
+- `QWEN_MODEL`: `qwen3.7-plus`
 - `APP_API_TOKEN`: `dev-token`
 
 ## Run Android Tests

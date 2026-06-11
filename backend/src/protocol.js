@@ -84,6 +84,8 @@ export function createLocalAssistResponse(request) {
   const utterance = typeof request?.utterance === 'string' ? request.utterance.trim() : '';
   if (!utterance) return null;
 
+  if (isScreenReadingCommand(utterance)) return createScreenReadingResponse(request);
+
   const direct = createDirectActionResponse(utterance);
   if (direct) return direct;
 
@@ -100,6 +102,10 @@ export function createFallbackAssistResponse(request) {
   const localResponse = createLocalAssistResponse(request);
   if (localResponse) return localResponse;
 
+  return createScreenReadingResponse(request);
+}
+
+function createScreenReadingResponse(request) {
   const nodes = Array.isArray(request?.screen?.nodes) ? request.screen.nodes : [];
   const labels = nodes
     .map((node) => node.text || node.contentDescription)
@@ -115,6 +121,20 @@ export function createFallbackAssistResponse(request) {
     requiresConfirmation: false,
     actions: []
   };
+}
+
+function isScreenReadingCommand(utterance) {
+  const normalized = normalize(utterance);
+  return [
+    '这里有什么',
+    '当前页面有什么',
+    '读一下当前页面',
+    '读当前页面',
+    '朗读当前页面',
+    '看一下当前屏幕',
+    '查看当前屏幕',
+    '当前屏幕有什么'
+  ].includes(normalized);
 }
 
 export function sanitizeAssistResponse(response) {

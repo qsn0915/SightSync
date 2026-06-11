@@ -1,5 +1,5 @@
 export const DEFAULT_QWEN_ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
-export const DEFAULT_QWEN_MODEL = 'qwen3.6-plus';
+export const DEFAULT_QWEN_MODEL = 'qwen3.7-plus';
 
 const SYSTEM_PROMPT = `你是 SightSync Android 盲人 AI 无障碍助手 V1 的规划器。
 你必须只返回一个 JSON object，不要返回 Markdown、解释文字、脚本或自由执行命令。

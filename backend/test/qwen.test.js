@@ -8,7 +8,7 @@ import {
   parseQwenChatCompletion
 } from '../src/qwen.js';
 
-test('createQwenConfig uses DashScope Qwen 3.6 Plus defaults without exposing app tokens', () => {
+test('createQwenConfig uses DashScope Qwen 3.7 Plus defaults without exposing app tokens', () => {
   const config = createQwenConfig({
     QWEN_API_KEY: 'test-qwen-key',
     APP_API_TOKEN: 'app-token-that-must-not-be-used'
@@ -24,7 +24,7 @@ test('buildQwenChatCompletionRequest asks for strict JSON and disables thinking'
 
   const payload = buildQwenChatCompletionRequest(request, DEFAULT_QWEN_MODEL);
 
-  assert.equal(payload.model, 'qwen3.6-plus');
+  assert.equal(payload.model, 'qwen3.7-plus');
   assert.deepEqual(payload.response_format, { type: 'json_object' });
   assert.equal(payload.enable_thinking, false);
   assert.match(payload.messages[0].content, /JSON/i);

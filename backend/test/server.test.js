@@ -26,7 +26,10 @@ test('POST /v1/assist returns fallback response when provider is not configured'
         'Authorization': 'Bearer dev-token',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(validRequest())
+      body: JSON.stringify({
+        ...validRequest(),
+        utterance: '请分析这个设置页面'
+      })
     });
     const body = await response.json();
 
@@ -72,7 +75,10 @@ test('POST /v1/assist calls Qwen provider and validates returned protocol', asyn
         'Authorization': 'Bearer dev-token',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(validRequest())
+      body: JSON.stringify({
+        ...validRequest(),
+        utterance: '请分析这个设置页面'
+      })
     });
     const body = await response.json();
     const providerBody = JSON.parse(capturedOptions.body);
@@ -144,6 +150,62 @@ test('POST /v1/assist handles clear local commands before calling provider', asy
   }
 });
 
+test('POST /v1/assist handles screen reading locally before calling provider', async () => {
+  let fetchCalls = 0;
+  const { server, baseUrl } = await listen({
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.7-plus'
+    },
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: '{"spoken":"不应调用 provider。","requiresConfirmation":false,"actions":[]}'
+              }
+            }
+          ]
+        })
+      };
+    }
+  });
+  try {
+    const response = await fetch(`${baseUrl}/v1/assist`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer dev-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        ...validRequest(),
+        utterance: '这里有什么',
+        screen: {
+          ...validRequest().screen,
+          nodes: [
+            { nodeId: 'node_settings', text: '设置', role: 'TextView' },
+            { nodeId: 'node_wlan', text: 'WLAN', role: 'Button', clickable: true }
+          ]
+        }
+      })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(fetchCalls, 0);
+    assert.equal(body.requiresConfirmation, false);
+    assert.deepEqual(body.actions, []);
+    assert.match(body.spoken, /设置/);
+    assert.match(body.spoken, /WLAN/);
+  } finally {
+    await close(server);
+  }
+});
+
 test('POST /v1/assist rejects provider actions outside the V1 allowlist', async () => {
   const { server, baseUrl } = await listen({
     qwenConfig: {
@@ -171,7 +233,10 @@ test('POST /v1/assist rejects provider actions outside the V1 allowlist', async 
         'Authorization': 'Bearer dev-token',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(validRequest())
+      body: JSON.stringify({
+        ...validRequest(),
+        utterance: '请分析这个设置页面'
+      })
     });
     const body = await response.json();
 
