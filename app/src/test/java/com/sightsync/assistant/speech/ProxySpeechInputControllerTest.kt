@@ -1,5 +1,8 @@
 package com.sightsync.assistant.speech
 
+import com.sightsync.assistant.ai.AiProxyEndpoint
+import com.sightsync.assistant.ai.AiProxyErrorType
+import com.sightsync.assistant.ai.AiProxyException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -64,12 +67,36 @@ class ProxySpeechInputControllerTest {
     fun transcriptionServiceUnavailableUsesClearVoicePrompt() = runTest {
         val speechInput = ProxySpeechInputController(
             FakeAudioRecorder(RecordedAudio(byteArrayOf(1), "audio/mp4")),
-            FakeTranscriptionClient(error = IOException("AI 代理转写返回 504")),
+            FakeTranscriptionClient(error = aiProxyError(AiProxyErrorType.ProviderUnavailable, statusCode = 503)),
         )
 
         val result = speechInput.listenOnce()
 
         assertEquals(SpeechInputResult.Failed("语音转写服务暂时不可用，请稍后重试。"), result)
+    }
+
+    @Test
+    fun transcriptionRemoteTimeoutUsesSpecificVoicePrompt() = runTest {
+        val speechInput = ProxySpeechInputController(
+            FakeAudioRecorder(RecordedAudio(byteArrayOf(1), "audio/mp4")),
+            FakeTranscriptionClient(error = aiProxyError(AiProxyErrorType.RemoteTimeout, statusCode = 504)),
+        )
+
+        val result = speechInput.listenOnce()
+
+        assertEquals(SpeechInputResult.Failed("语音转写服务响应超时，请稍后重试。"), result)
+    }
+
+    @Test
+    fun transcriptionAuthorizationFailureUsesSpecificVoicePrompt() = runTest {
+        val speechInput = ProxySpeechInputController(
+            FakeAudioRecorder(RecordedAudio(byteArrayOf(1), "audio/mp4")),
+            FakeTranscriptionClient(error = aiProxyError(AiProxyErrorType.Authorization, statusCode = 401)),
+        )
+
+        val result = speechInput.listenOnce()
+
+        assertEquals(SpeechInputResult.Failed("语音转写鉴权失败，请检查代理配置。"), result)
     }
 
     @Test
@@ -113,3 +140,14 @@ private class FakeTranscriptionClient(
         return text.orEmpty()
     }
 }
+
+private fun aiProxyError(
+    type: AiProxyErrorType,
+    statusCode: Int? = null,
+): AiProxyException =
+    AiProxyException(
+        endpoint = AiProxyEndpoint.Transcribe,
+        type = type,
+        statusCode = statusCode,
+        message = "typed test error",
+    )

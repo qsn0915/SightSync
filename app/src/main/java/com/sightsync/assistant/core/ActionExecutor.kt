@@ -4,10 +4,11 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.graphics.Rect
 import android.os.Bundle
-import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import com.sightsync.assistant.accessibility.ActionRunner
 import com.sightsync.assistant.ai.AssistantAction
+import com.sightsync.assistant.diagnostics.AndroidDiagnosticLogger
+import com.sightsync.assistant.diagnostics.DiagnosticLogger
 
 data class ActionResult(
     val success: Boolean,
@@ -43,6 +44,7 @@ private class AccessibilityAppLauncher(
 class ActionExecutor(
     private val service: AccessibilityService? = null,
     private val appLauncher: AppLauncher = AccessibilityAppLauncher(requireNotNull(service)),
+    private val diagnosticLogger: DiagnosticLogger = AndroidDiagnosticLogger,
 ) : ActionRunner {
     override fun execute(
         actions: List<AssistantAction>,
@@ -105,6 +107,7 @@ class ActionExecutor(
 
     private fun openApp(packageName: String?): ActionResult {
         if (packageName.isNullOrBlank()) return ActionResult(false, "缺少应用包名。")
+        debugLog("OPEN_APP requested. package=$packageName")
         return when (val result = appLauncher.launch(packageName)) {
             AppLaunchResult.Succeeded -> {
                 debugLog("OPEN_APP succeeded. package=$packageName")
@@ -193,7 +196,7 @@ class ActionExecutor(
         )
 
     private fun debugLog(message: String) {
-        runCatching { Log.d(TAG, message) }
+        diagnosticLogger.log(TAG, message)
     }
 
     private data class NodeLookup(

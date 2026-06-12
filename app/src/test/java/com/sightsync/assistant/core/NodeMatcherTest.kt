@@ -96,6 +96,14 @@ class NodeMatcherTest {
     }
 
     @Test
+    fun snapshotDoesNotMatchWhenBoundsMoveTooFar() {
+        val expected = nodes[1]
+        val current = expected.copy(bounds = NodeBounds(260, 100, 460, 180))
+
+        assertFalse(NodeMatcher.matchesSnapshot(current = current, expected = expected))
+    }
+
+    @Test
     fun findsClickableNodeByContentDescription() {
         val result = NodeMatcher.findUniqueClickable(
             listOf(

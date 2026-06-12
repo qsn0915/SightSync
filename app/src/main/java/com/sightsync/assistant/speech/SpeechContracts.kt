@@ -12,6 +12,8 @@ interface SpeechInput {
 }
 
 interface SpeechOutput {
+    val isAvailable: Boolean
+        get() = true
     val isSpeaking: Boolean
     fun speak(text: String)
     suspend fun speakAndAwait(text: String) {

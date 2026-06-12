@@ -16,6 +16,18 @@ object RiskClassifier {
         "注销",
         "退出登录",
     )
+    private val contextRejectionKeywords = listOf(
+        "支付",
+        "付款",
+        "转账",
+        "支付密码",
+        "密码",
+        "验证码",
+        "银行卡",
+        "bank",
+        "wallet",
+        "pay",
+    )
 
     fun requiresConfirmation(
         utterance: String,
@@ -41,5 +53,30 @@ object RiskClassifier {
         }
         val content = "$utterance $actionText"
         return highRiskKeywords.any(content::contains)
+    }
+
+    fun shouldRejectActionsInContext(
+        actions: List<AssistantAction>,
+        screenContext: ScreenContext,
+    ): Boolean {
+        if (actions.isEmpty()) return false
+
+        val screenText = buildString {
+            append(screenContext.packageName)
+            append(' ')
+            append(screenContext.activityName.orEmpty())
+            screenContext.nodes.forEach { node ->
+                append(' ')
+                append(node.text.orEmpty())
+                append(' ')
+                append(node.contentDescription.orEmpty())
+                append(' ')
+                append(node.role)
+            }
+        }
+        val normalized = screenText.lowercase()
+        return contextRejectionKeywords.any { keyword ->
+            normalized.contains(keyword.lowercase())
+        }
     }
 }

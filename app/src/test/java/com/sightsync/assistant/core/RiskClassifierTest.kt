@@ -86,6 +86,72 @@ class RiskClassifierTest {
         assertFalse(RiskClassifier.requiresConfirmation("打开设置", listOf(action)))
     }
 
+    @Test
+    fun paymentPasswordPageRejectsActionExecution() {
+        val action = AssistantAction(type = "CLICK_NODE", nodeId = "node_ok")
+        val screen = screenWith(
+            ScreenNode(
+                nodeId = "title",
+                text = "请输入支付密码",
+                contentDescription = null,
+                role = "Text",
+                bounds = NodeBounds(0, 0, 400, 80),
+                clickable = false,
+                editable = false,
+                scrollable = false,
+            ),
+            ScreenNode(
+                nodeId = "node_ok",
+                text = "确定",
+                contentDescription = null,
+                role = "Button",
+                bounds = NodeBounds(0, 100, 200, 180),
+                clickable = true,
+                editable = false,
+                scrollable = false,
+            ),
+        )
+
+        assertTrue(RiskClassifier.shouldRejectActionsInContext(listOf(action), screen))
+    }
+
+    @Test
+    fun verificationCodePageRejectsTextEntry() {
+        val action = AssistantAction(type = "SET_TEXT", nodeId = "code_input", text = "123456")
+        val screen = screenWith(
+            ScreenNode(
+                nodeId = "code_input",
+                text = null,
+                contentDescription = "验证码输入框",
+                role = "EditText",
+                bounds = NodeBounds(0, 0, 400, 80),
+                clickable = true,
+                editable = true,
+                scrollable = false,
+            ),
+        )
+
+        assertTrue(RiskClassifier.shouldRejectActionsInContext(listOf(action), screen))
+    }
+
+    @Test
+    fun highRiskPageDoesNotRejectReadOnlyResponseWithoutActions() {
+        val screen = screenWith(
+            ScreenNode(
+                nodeId = "title",
+                text = "订单付款",
+                contentDescription = null,
+                role = "Text",
+                bounds = NodeBounds(0, 0, 400, 80),
+                clickable = false,
+                editable = false,
+                scrollable = false,
+            ),
+        )
+
+        assertFalse(RiskClassifier.shouldRejectActionsInContext(emptyList(), screen))
+    }
+
     private fun screenWith(vararg nodes: ScreenNode): ScreenContext =
         ScreenContext(
             packageName = "com.android.settings",

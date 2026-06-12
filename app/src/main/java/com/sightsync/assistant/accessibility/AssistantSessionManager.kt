@@ -1,13 +1,16 @@
 ﻿package com.sightsync.assistant.accessibility
 
-import android.util.Log
 import com.sightsync.assistant.ai.AiProtocolValidator
+import com.sightsync.assistant.ai.AiProxyErrorType
+import com.sightsync.assistant.ai.AiProxyException
 import com.sightsync.assistant.ai.AssistResponse
 import com.sightsync.assistant.apps.OpenAppCommandResolver
 import com.sightsync.assistant.apps.OpenAppCommandResult
 import com.sightsync.assistant.core.RiskClassifier
 import com.sightsync.assistant.core.ScreenContext
 import com.sightsync.assistant.core.ScreenContextProvider
+import com.sightsync.assistant.diagnostics.AndroidDiagnosticLogger
+import com.sightsync.assistant.diagnostics.DiagnosticLogger
 import com.sightsync.assistant.speech.SpeechInput
 import com.sightsync.assistant.speech.SpeechInputResult
 import com.sightsync.assistant.speech.SpeechOutput
@@ -29,6 +32,7 @@ class AssistantSessionManager(
     private val actionRunner: ActionRunner,
     private val openAppCommandResolver: OpenAppCommandResolver? = null,
     private val onContinuousListeningChanged: (Boolean) -> Unit = {},
+    private val diagnosticLogger: DiagnosticLogger = AndroidDiagnosticLogger,
 ) {
     private var activeJob: Job? = null
     private var continuousJob: Job? = null
@@ -199,6 +203,9 @@ class AssistantSessionManager(
             processPlannedResponse(utterance, response, screenContext)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (proxy: AiProxyException) {
+            voiceTurnCoordinator.speakResult(proxy.toAssistVoicePrompt())
+            TurnResult.Completed
         } catch (timeout: InterruptedIOException) {
             voiceTurnCoordinator.speakResult("AI 请求超时，请稍后重试。")
             TurnResult.Completed
@@ -280,6 +287,12 @@ class AssistantSessionManager(
             return TurnResult.Completed
         }
 
+        if (RiskClassifier.shouldRejectActionsInContext(response.actions, screenContext)) {
+            confirmationManager.clear()
+            voiceTurnCoordinator.speakResult("当前页面包含支付、密码或验证码等高风险内容，暂不执行操作。")
+            return TurnResult.Completed
+        }
+
         val risky = response.requiresConfirmation ||
             RiskClassifier.requiresConfirmation(utterance, response.actions, screenContext)
         if (risky && response.actions.isNotEmpty()) {
@@ -326,8 +339,21 @@ class AssistantSessionManager(
         )
 
     private fun debugLog(message: String) {
-        runCatching { Log.d(TAG, message) }
+        diagnosticLogger.log(TAG, message)
     }
+
+    private fun AiProxyException.toAssistVoicePrompt(): String =
+        when (type) {
+            AiProxyErrorType.Authorization -> "AI 服务鉴权失败，请检查代理配置。"
+            AiProxyErrorType.RateLimited -> "AI 服务请求过于频繁，请稍后重试。"
+            AiProxyErrorType.ProviderUnavailable -> "AI 服务暂时不可用，请稍后重试。"
+            AiProxyErrorType.RemoteTimeout -> "AI 服务响应超时，请稍后重试。"
+            AiProxyErrorType.ClientTimeout -> "AI 请求超时，请检查网络后重试。"
+            AiProxyErrorType.Network -> "网络连接失败，请检查网络后重试。"
+            AiProxyErrorType.EmptyBody,
+            AiProxyErrorType.Http,
+            -> "AI 服务响应异常，已停止执行。"
+        }
 
     private companion object {
         const val TAG = "SightSyncSession"

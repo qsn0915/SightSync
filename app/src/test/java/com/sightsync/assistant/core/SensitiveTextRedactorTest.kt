@@ -21,6 +21,21 @@ class SensitiveTextRedactorTest {
     }
 
     @Test
+    fun redactsMainlandPhoneNumbers() {
+        assertEquals("[手机号已隐藏]", SensitiveTextRedactor.redact("联系人 13812345678", role = "TextView"))
+    }
+
+    @Test
+    fun redactsMainlandIdCardNumbers() {
+        assertEquals("[身份证号已隐藏]", SensitiveTextRedactor.redact("110101199001011234", role = "TextView"))
+    }
+
+    @Test
+    fun redactsEmailAddresses() {
+        assertEquals("[邮箱已隐藏]", SensitiveTextRedactor.redact("test@example.com", role = "TextView"))
+    }
+
+    @Test
     fun keepsOrdinaryText() {
         assertEquals("点击确定继续", SensitiveTextRedactor.redact("点击确定继续", role = "Button"))
     }

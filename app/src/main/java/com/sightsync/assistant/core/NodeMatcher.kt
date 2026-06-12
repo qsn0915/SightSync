@@ -36,6 +36,7 @@ object NodeMatcher {
         if (expected.clickable && !current.clickable) return false
         if (expected.editable && !current.editable) return false
         if (expected.scrollable && !current.scrollable) return false
+        if (!boundsAreClose(current.bounds, expected.bounds)) return false
         if (expected.role != "Unknown" && current.role != "Unknown" && expected.role != current.role) {
             return false
         }
@@ -59,4 +60,17 @@ object NodeMatcher {
 
     private fun normalize(value: String): String =
         value.lowercase().filterNot { it.isWhitespace() || it in "，。！？、,.!?:" }
+
+    private fun boundsAreClose(current: NodeBounds, expected: NodeBounds): Boolean {
+        if (current.isEmpty() || expected.isEmpty()) return true
+        return kotlin.math.abs(current.left - expected.left) <= MAX_BOUNDS_DELTA_PX &&
+            kotlin.math.abs(current.top - expected.top) <= MAX_BOUNDS_DELTA_PX &&
+            kotlin.math.abs(current.right - expected.right) <= MAX_BOUNDS_DELTA_PX &&
+            kotlin.math.abs(current.bottom - expected.bottom) <= MAX_BOUNDS_DELTA_PX
+    }
+
+    private fun NodeBounds.isEmpty(): Boolean =
+        left == 0 && top == 0 && right == 0 && bottom == 0
+
+    private const val MAX_BOUNDS_DELTA_PX = 100
 }

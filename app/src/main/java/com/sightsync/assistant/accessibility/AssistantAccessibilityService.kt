@@ -10,7 +10,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
+import android.widget.Toast
 import com.sightsync.assistant.BuildConfig
 import com.sightsync.assistant.MainActivity
 import com.sightsync.assistant.ai.AiProxyClient
@@ -29,6 +32,7 @@ import kotlinx.coroutines.cancel
 class AssistantAccessibilityService : AccessibilityService() {
     companion object {
         const val ACTION_STOP_LISTENING = "com.sightsync.assistant.action.STOP_LISTENING"
+        private const val SPEECH_OUTPUT_UNAVAILABLE_MESSAGE = "语音输出不可用，请检查系统 TTS 设置。"
         private const val LISTENING_CHANNEL_ID = "sightsync_continuous_listening"
         private const val LISTENING_NOTIFICATION_ID = 1001
         private var activeService: AssistantAccessibilityService? = null
@@ -39,15 +43,20 @@ class AssistantAccessibilityService : AccessibilityService() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var overlayController: OverlayController
     private lateinit var ttsOutputController: TtsOutputController
     private lateinit var speechInputController: ProxySpeechInputController
     private lateinit var sessionManager: AssistantSessionManager
+    private var speechOutputAvailable = true
+    private var listeningForegroundStarted = false
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         activeService = this
-        ttsOutputController = TtsOutputController(this)
+        ttsOutputController = TtsOutputController(this) {
+            showSpeechOutputUnavailableFallback()
+        }
         val aiProxyClient = AiProxyClient(BuildConfig.AI_PROXY_BASE_URL, BuildConfig.APP_API_TOKEN)
         speechInputController = ProxySpeechInputController(
             audioRecorder = ShortAudioRecorder(this),
@@ -113,6 +122,14 @@ class AssistantAccessibilityService : AccessibilityService() {
         stopListeningForeground()
     }
 
+    private fun showSpeechOutputUnavailableFallback() {
+        mainHandler.post {
+            speechOutputAvailable = false
+            Toast.makeText(this, SPEECH_OUTPUT_UNAVAILABLE_MESSAGE, Toast.LENGTH_LONG).show()
+            updateListeningNotification()
+        }
+    }
+
     private fun startListeningForeground(): Boolean {
         return runCatching {
             createListeningNotificationChannel()
@@ -121,10 +138,12 @@ class AssistantAccessibilityService : AccessibilityService() {
                 createListeningNotification(),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
             )
+            listeningForegroundStarted = true
         }.isSuccess
     }
 
     private fun stopListeningForeground() {
+        listeningForegroundStarted = false
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
@@ -137,6 +156,14 @@ class AssistantAccessibilityService : AccessibilityService() {
             description = "显示 SightSync 正在连续聆听语音指令。"
         }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    private fun updateListeningNotification() {
+        if (!listeningForegroundStarted) return
+        runCatching {
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager.notify(LISTENING_NOTIFICATION_ID, createListeningNotification())
+        }
     }
 
     private fun createListeningNotification(): Notification {
@@ -158,7 +185,13 @@ class AssistantAccessibilityService : AccessibilityService() {
         return Notification.Builder(this, LISTENING_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("SightSync 正在连续聆听")
-            .setContentText("麦克风正在等待你的语音指令。")
+            .setContentText(
+                if (speechOutputAvailable) {
+                    "麦克风正在等待你的语音指令。"
+                } else {
+                    SPEECH_OUTPUT_UNAVAILABLE_MESSAGE
+                },
+            )
             .setContentIntent(openAppIntent)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)

@@ -37,6 +37,18 @@ class AssistantAccessibilityServiceSourceTest {
     }
 
     @Test
+    fun ttsInitializationFailureUsesVisibleFallbackStatus() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+
+        assertTrue(source.contains("TtsOutputController(this) {"))
+        assertTrue(source.contains("showSpeechOutputUnavailableFallback()"))
+        assertTrue(source.contains("Toast.makeText"))
+        assertTrue(source.contains("语音输出不可用，请检查系统 TTS 设置。"))
+        assertTrue(source.contains("updateListeningNotification()"))
+        assertTrue(source.contains("notify(LISTENING_NOTIFICATION_ID"))
+    }
+
+    @Test
     fun wiresLocalOpenAppResolverIntoSessionManager() {
         val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
 

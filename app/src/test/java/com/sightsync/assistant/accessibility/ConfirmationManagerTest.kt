@@ -48,6 +48,32 @@ class ConfirmationManagerTest {
         assertNull(manager.consumeIfConfirmed("确认执行"))
     }
 
+    @Test
+    fun acceptsNaturalConfirmationPhrases() {
+        listOf("好的", "行", "可以", "没问题", "对", "嗯", "执行吧", "弄吧").forEach { utterance ->
+            val manager = ConfirmationManager()
+            val response = AssistResponse(
+                spoken = "我会继续。",
+                actions = listOf(AssistantAction(type = "CLICK_NODE", nodeId = "node_ok")),
+            )
+            manager.store(response, screen("com.example"))
+
+            val pending = manager.consumeIfConfirmed(utterance)
+
+            assertEquals("Expected confirmation phrase to be accepted: $utterance", response, pending?.response)
+            assertFalse(manager.hasPending)
+        }
+    }
+
+    @Test
+    fun recognizesNaturalCancellationPhrases() {
+        listOf("算了", "不要了", "不做了", "别弄了", "不了").forEach { utterance ->
+            val manager = ConfirmationManager()
+
+            assertTrue("Expected cancellation phrase to be recognized: $utterance", manager.isCancellation(utterance))
+        }
+    }
+
     private fun screen(packageName: String): ScreenContext =
         ScreenContext(
             packageName = packageName,

@@ -7,11 +7,14 @@
 
 1. [`纲领.md`](./纲领.md)：作为无障碍助手的 V1 安全底线、架构底线和动作白名单基础。
 2. [`docs/superpowers/specs/2026-05-18-v2-speech-stability-design.md`](./docs/superpowers/specs/2026-05-18-v2-speech-stability-design.md)：作为当前 V2 语音稳定性和显式开启后全天候连续聆听的执行标准。
+3. [`docs/superpowers/specs/2026-05-28-v2-boundary-update-design.md`](./docs/superpowers/specs/2026-05-28-v2-boundary-update-design.md)：作为当前 V2 边界更新、受限多步 Agent、上下文风控和语音优先视觉兜底的执行标准。
+4. [`SIGHTSYNC_LONG_TERM_PLAN.md`](./SIGHTSYNC_LONG_TERM_PLAN.md)：作为跨对话长期开发路线、Phase 小片拆分和阶段验收门槛。
 
 如果 V1 纲领与已批准 V2 规格存在冲突，以 V2 规格为准，但不得突破以下底线：
 
 - 以现有 SightSync Android App 的 V2 演进为目标，不回退到纯 V1 体验。
-- 支持用户显式开启后的全天候连续聆听；不做隐形热词唤醒、未授权后台录音、离线大模型或复杂自动化流程。
+- 支持用户显式开启后的全天候连续聆听；不做隐形热词唤醒、未授权后台录音、离线大模型、自由自主代理或非白名单动作执行。
+- 允许按已批准 V2 规格逐步演进受限多步 Agent：每一步都必须是白名单动作或已批准的内部控制步骤，必须可校验、可中断，高风险步骤必须二次确认。
 - 不在 Android App 内硬编码云端 AI API key，统一通过后端代理接入。
 - 对无障碍、语音、截图、AI 动作执行相关改动，必须同时满足 V1 纲领中的动作白名单、安全确认和验收标准，以及已批准 V2 规格中的长期连续聆听、半双工语音状态机、动态录音结束和明确取消语义。
 

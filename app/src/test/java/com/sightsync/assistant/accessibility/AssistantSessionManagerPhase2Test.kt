@@ -2,6 +2,9 @@ package com.sightsync.assistant.accessibility
 
 import com.sightsync.assistant.ai.AssistantAction
 import com.sightsync.assistant.ai.AssistResponse
+import com.sightsync.assistant.ai.AiProxyEndpoint
+import com.sightsync.assistant.ai.AiProxyErrorType
+import com.sightsync.assistant.ai.AiProxyException
 import com.sightsync.assistant.apps.AppCatalogProvider
 import com.sightsync.assistant.apps.InstalledApp
 import com.sightsync.assistant.apps.OpenAppCommandResolver
@@ -268,6 +271,51 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun aiRemoteTimeoutUsesSpecificVoicePrompt() = runTest {
+        val tts = FakeSpeechOutput()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("这里有什么")),
+            ai = FakeAssistantClient(error = aiProxyError(AiProxyErrorType.RemoteTimeout, statusCode = 504)),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(tts.spoken.contains("AI 服务响应超时，请稍后重试。"))
+    }
+
+    @Test
+    fun aiProviderUnavailableUsesSpecificVoicePrompt() = runTest {
+        val tts = FakeSpeechOutput()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("这里有什么")),
+            ai = FakeAssistantClient(error = aiProxyError(AiProxyErrorType.ProviderUnavailable, statusCode = 503)),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(tts.spoken.contains("AI 服务暂时不可用，请稍后重试。"))
+    }
+
+    @Test
+    fun aiAuthorizationFailureUsesSpecificVoicePrompt() = runTest {
+        val tts = FakeSpeechOutput()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("这里有什么")),
+            ai = FakeAssistantClient(error = aiProxyError(AiProxyErrorType.Authorization, statusCode = 401)),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(tts.spoken.contains("AI 服务鉴权失败，请检查代理配置。"))
+    }
+
+    @Test
     fun invalidAiPayloadUsesClearVoicePrompt() = runTest {
         val tts = FakeSpeechOutput()
         val manager = manager(
@@ -306,12 +354,14 @@ class AssistantSessionManagerPhase2Test {
         val screen = FakeScreenContextProvider()
         val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
         val actions = FakeActionRunner()
+        val logger = FakeDiagnosticLogger()
         val manager = manager(
             tts = tts,
             speech = FakeSpeechInput(SpeechInputResult.Recognized("帮我打开设置")),
             screen = screen,
             ai = ai,
             actions = actions,
+            diagnosticLogger = logger,
             openAppCommandResolver = openAppResolver(
                 InstalledApp(label = "设置", packageName = "com.android.settings"),
             ),
@@ -327,6 +377,9 @@ class AssistantSessionManagerPhase2Test {
             actions.executions.single().actions,
         )
         assertTrue(tts.spoken.contains("我会打开设置。"))
+        assertTrue(logger.messages.contains("SightSyncSession: ASR utterance='帮我打开设置'"))
+        assertTrue(logger.messages.contains("SightSyncSession: Resolving local open-app command. pendingCandidates=0"))
+        assertTrue(logger.messages.any { it.startsWith("SightSyncSession: Local open-app resolved.") })
     }
 
     @Test
@@ -731,11 +784,11 @@ class AssistantSessionManagerPhase2Test {
             SpeechInputResult.Recognized("确认执行"),
         )
         val sourceScreen = screenContext(
-            packageName = "com.example.pay",
+            packageName = "com.example.form",
             nodes = listOf(
                 ScreenNode(
-                    nodeId = "node_pay",
-                    text = "立即支付",
+                    nodeId = "node_submit",
+                    text = "提交",
                     contentDescription = null,
                     role = "Button",
                     bounds = NodeBounds(0, 0, 200, 80),
@@ -748,7 +801,7 @@ class AssistantSessionManagerPhase2Test {
         val actions = FakeActionRunner()
         val response = AssistResponse(
             spoken = "我会点击这个按钮。",
-            actions = listOf(AssistantAction(type = "CLICK_NODE", nodeId = "node_pay")),
+            actions = listOf(AssistantAction(type = "CLICK_NODE", nodeId = "node_submit")),
         )
         val manager = manager(
             tts = tts,
@@ -770,6 +823,103 @@ class AssistantSessionManagerPhase2Test {
         assertEquals(response.actions, actions.executions.single().actions)
         assertTrue(actions.executions.single().confirmed)
         assertEquals(sourceScreen, actions.executions.single().sourceScreen)
+    }
+
+    @Test
+    fun paymentPasswordPageRejectsActionInsteadOfRequestingConfirmation() = runTest {
+        val tts = FakeSpeechOutput()
+        val sourceScreen = screenContext(
+            packageName = "com.example.wallet",
+            nodes = listOf(
+                ScreenNode(
+                    nodeId = "title",
+                    text = "请输入支付密码",
+                    contentDescription = null,
+                    role = "Text",
+                    bounds = NodeBounds(0, 0, 400, 80),
+                    clickable = false,
+                    editable = false,
+                    scrollable = false,
+                ),
+                ScreenNode(
+                    nodeId = "node_ok",
+                    text = "确定",
+                    contentDescription = null,
+                    role = "Button",
+                    bounds = NodeBounds(0, 100, 200, 180),
+                    clickable = true,
+                    editable = false,
+                    scrollable = false,
+                ),
+            ),
+        )
+        val actions = FakeActionRunner()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("点击确定")),
+            screen = FakeScreenContextProvider(sourceScreen),
+            ai = FakeAssistantClient(
+                response = AssistResponse(
+                    spoken = "我会点击确定。",
+                    actions = listOf(AssistantAction(type = "CLICK_NODE", nodeId = "node_ok")),
+                ),
+            ),
+            actions = actions,
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(tts.spoken.contains("当前页面包含支付、密码或验证码等高风险内容，暂不执行操作。"))
+        assertFalse(tts.spoken.any { it.contains("确认执行") })
+        assertTrue(actions.executions.isEmpty())
+    }
+
+    @Test
+    fun highRiskContextRejectionDoesNotLeavePendingConfirmation() = runTest {
+        val tts = FakeSpeechOutput()
+        val sourceScreen = screenContext(
+            packageName = "com.example.bank",
+            nodes = listOf(
+                ScreenNode(
+                    nodeId = "code_input",
+                    text = null,
+                    contentDescription = "短信验证码",
+                    role = "EditText",
+                    bounds = NodeBounds(0, 0, 400, 80),
+                    clickable = true,
+                    editable = true,
+                    scrollable = false,
+                ),
+            ),
+        )
+        val actions = FakeActionRunner()
+        val ai = FakeAssistantClient(
+            response = AssistResponse(
+                spoken = "我会输入验证码。",
+                actions = listOf(AssistantAction(type = "SET_TEXT", nodeId = "code_input", text = "123456")),
+            ),
+        )
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("输入验证码"),
+                SpeechInputResult.Recognized("确认执行"),
+            ),
+            screen = FakeScreenContextProvider(sourceScreen, sourceScreen),
+            ai = ai,
+            actions = actions,
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(listOf("输入验证码", "确认执行"), ai.utterances)
+        assertEquals(2, tts.spoken.count { it == "当前页面包含支付、密码或验证码等高风险内容，暂不执行操作。" })
+        assertTrue(actions.executions.isEmpty())
     }
 
     @Test
@@ -814,6 +964,7 @@ class AssistantSessionManagerPhase2Test {
         ai: FakeAssistantClient = FakeAssistantClient(response = AssistResponse(spoken = "好的。")),
         actions: FakeActionRunner = FakeActionRunner(),
         openAppCommandResolver: OpenAppCommandResolver? = null,
+        diagnosticLogger: com.sightsync.assistant.diagnostics.DiagnosticLogger = com.sightsync.assistant.diagnostics.NoOpDiagnosticLogger,
     ): AssistantSessionManager {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
@@ -825,6 +976,7 @@ class AssistantSessionManagerPhase2Test {
             assistantClient = ai,
             actionRunner = actions,
             openAppCommandResolver = openAppCommandResolver,
+            diagnosticLogger = diagnosticLogger,
         )
     }
 }
@@ -943,6 +1095,25 @@ private class FakeActionRunner(
         return results ?: actions.map { ActionResult(true, "已执行。") }
     }
 }
+
+private class FakeDiagnosticLogger : com.sightsync.assistant.diagnostics.DiagnosticLogger {
+    val messages = mutableListOf<String>()
+
+    override fun log(tag: String, message: String) {
+        messages += "$tag: $message"
+    }
+}
+
+private fun aiProxyError(
+    type: AiProxyErrorType,
+    statusCode: Int? = null,
+): AiProxyException =
+    AiProxyException(
+        endpoint = AiProxyEndpoint.Assist,
+        type = type,
+        statusCode = statusCode,
+        message = "typed test error",
+    )
 
 private data class ActionExecution(
     val actions: List<AssistantAction>,
