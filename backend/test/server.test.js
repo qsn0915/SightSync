@@ -2,6 +2,67 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from '../src/server.js';
 
+test('GET /v1/health requires bearer token', async () => {
+  const { server, baseUrl } = await listen();
+  try {
+    const response = await fetch(`${baseUrl}/v1/health`);
+    const body = await response.json();
+
+    assert.equal(response.status, 401);
+    assert.deepEqual(body.error, {
+      code: 'authorization_failed',
+      message: 'unauthorized'
+    });
+  } finally {
+    await close(server);
+  }
+});
+
+test('GET /v1/health returns provider unavailable when Qwen is not configured', async () => {
+  const { server, baseUrl } = await listen({ qwenConfig: {} });
+  try {
+    const response = await fetch(`${baseUrl}/v1/health`, {
+      headers: { 'Authorization': 'Bearer dev-token' }
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 503);
+    assert.equal(body.status, 'unavailable');
+    assert.deepEqual(body.error, {
+      code: 'provider_unavailable',
+      message: 'ai provider not configured'
+    });
+  } finally {
+    await close(server);
+  }
+});
+
+test('GET /v1/health returns ok when provider is configured', async () => {
+  const { server, baseUrl } = await listen({
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.6-plus',
+      asrModel: 'qwen3-asr-flash'
+    }
+  });
+  try {
+    const response = await fetch(`${baseUrl}/v1/health`, {
+      headers: { 'Authorization': 'Bearer dev-token' }
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body, {
+      status: 'ok',
+      provider: 'configured',
+      asrProvider: 'configured'
+    });
+  } finally {
+    await close(server);
+  }
+});
+
 test('POST /v1/assist requires bearer token', async () => {
   const { server, baseUrl } = await listen();
   try {
@@ -18,7 +79,7 @@ test('POST /v1/assist requires bearer token', async () => {
 });
 
 test('POST /v1/assist returns fallback response when provider is not configured', async () => {
-  const { server, baseUrl } = await listen();
+  const { server, baseUrl } = await listen({ qwenConfig: {} });
   try {
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
@@ -241,8 +302,9 @@ test('POST /v1/assist rejects provider actions outside the V1 allowlist', async 
     const body = await response.json();
 
     assert.equal(response.status, 502);
-    assert.equal(body.error, 'ai response invalid');
-    assert.match(body.detail, /unsupported action type: RUN_SCRIPT/);
+    assert.equal(body.error.code, 'provider_response_invalid');
+    assert.equal(body.error.message, 'ai response invalid');
+    assert.match(body.error.detail, /unsupported action type: RUN_SCRIPT/);
   } finally {
     await close(server);
   }
@@ -298,6 +360,33 @@ test('POST /v1/transcribe calls Qwen ASR and returns recognized text', async () 
   }
 });
 
+test('POST /v1/transcribe returns normalized provider unavailable error when ASR is not configured', async () => {
+  const { server, baseUrl } = await listen({ qwenConfig: {} });
+  try {
+    const response = await fetch(`${baseUrl}/v1/transcribe`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer dev-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        locale: 'zh-CN',
+        mimeType: 'audio/mp4',
+        audioBase64: 'AAAA'
+      })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(body.error, {
+      code: 'provider_unavailable',
+      message: 'asr provider not configured'
+    });
+  } finally {
+    await close(server);
+  }
+});
+
 test('POST /v1/transcribe returns 504 before the Android client call timeout when ASR stalls', async () => {
   const controller = new AbortController();
   const { server, baseUrl } = await listen({
@@ -336,7 +425,11 @@ test('POST /v1/transcribe returns 504 before the Android client call timeout whe
     }
     assert.notEqual(result, 'client timed out');
     assert.equal(result.status, 504);
-    assert.equal(result.body.error, 'ai provider timeout');
+    assert.deepEqual(result.body.error, {
+      code: 'provider_timeout',
+      message: 'ai provider timeout',
+      detail: 'provider request timed out'
+    });
   } finally {
     server.closeAllConnections?.();
     await close(server);

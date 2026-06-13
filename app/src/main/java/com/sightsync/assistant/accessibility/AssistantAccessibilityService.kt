@@ -14,9 +14,10 @@ import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
-import com.sightsync.assistant.BuildConfig
 import com.sightsync.assistant.MainActivity
-import com.sightsync.assistant.ai.AiProxyClient
+import com.sightsync.assistant.ai.AiServiceConnectionConfigStore
+import com.sightsync.assistant.ai.ConfiguredAiProxyClientFactory
+import com.sightsync.assistant.ai.MissingAiServiceConnectionClient
 import com.sightsync.assistant.apps.OpenAppCommandResolver
 import com.sightsync.assistant.apps.PackageManagerAppCatalogProvider
 import com.sightsync.assistant.core.ActionExecutor
@@ -57,7 +58,9 @@ class AssistantAccessibilityService : AccessibilityService() {
         ttsOutputController = TtsOutputController(this) {
             showSpeechOutputUnavailableFallback()
         }
-        val aiProxyClient = AiProxyClient(BuildConfig.AI_PROXY_BASE_URL, BuildConfig.APP_API_TOKEN)
+        val aiProxyClient = ConfiguredAiProxyClientFactory.create(
+            AiServiceConnectionConfigStore.create(this).load(),
+        ) ?: MissingAiServiceConnectionClient
         speechInputController = ProxySpeechInputController(
             audioRecorder = ShortAudioRecorder(this),
             transcriptionClient = aiProxyClient,

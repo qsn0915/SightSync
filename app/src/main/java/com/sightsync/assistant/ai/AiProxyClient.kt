@@ -1,9 +1,7 @@
 ﻿package com.sightsync.assistant.ai
 
-import com.sightsync.assistant.accessibility.AssistantClient
 import com.sightsync.assistant.core.ScreenContext
 import com.sightsync.assistant.speech.RecordedAudio
-import com.sightsync.assistant.speech.TranscriptionClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -26,10 +24,11 @@ class AiProxyClient(
         .readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(25, TimeUnit.SECONDS)
         .build(),
-) : AssistantClient, TranscriptionClient {
+) : AiServiceClient, AiProxyHealthClient {
     private val normalizedBaseUrl = baseUrl.trimEnd('/')
     private val assistEndpoint = "$normalizedBaseUrl/v1/assist"
     private val transcribeEndpoint = "$normalizedBaseUrl/v1/transcribe"
+    private val healthEndpoint = "$normalizedBaseUrl/v1/health"
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -71,6 +70,19 @@ class AiProxyClient(
 
         executeWithSingleRetry(AiProxyEndpoint.Transcribe, request) { responseBody ->
             json.decodeFromString<TranscribeResponse>(responseBody).text
+        }
+    }
+
+    override suspend fun checkHealth(): Unit = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(healthEndpoint)
+            .header("Authorization", "Bearer $appToken")
+            .get()
+            .build()
+
+        executeWithSingleRetry(AiProxyEndpoint.Health, request) { responseBody ->
+            json.decodeFromString<AiProxyHealthResponse>(responseBody)
+            Unit
         }
     }
 
@@ -150,6 +162,7 @@ class AiProxyClient(
         get() = when (this) {
             AiProxyEndpoint.Assist -> "AI 代理"
             AiProxyEndpoint.Transcribe -> "AI 代理转写"
+            AiProxyEndpoint.Health -> "AI 代理健康检查"
         }
 
     private companion object {

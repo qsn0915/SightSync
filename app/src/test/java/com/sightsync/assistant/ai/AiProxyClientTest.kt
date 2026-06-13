@@ -109,6 +109,73 @@ class AiProxyClientTest {
         assertEquals(2, interceptor.requests.size)
     }
 
+    @Test
+    fun checkHealthCallsHealthEndpointWithAppToken() = runTest {
+        val interceptor = QueueInterceptor(
+            QueuedResult.Http(200, """{"status":"ok","provider":"configured","asrProvider":"configured"}"""),
+        )
+        val client = client(interceptor)
+
+        client.checkHealth()
+
+        assertEquals(1, interceptor.requests.size)
+        assertEquals("/v1/health", interceptor.requests.single().encodedPath)
+        assertEquals("GET", interceptor.methods.single())
+        assertEquals("Bearer test-token", interceptor.authorizationHeaders.single())
+    }
+
+    @Test
+    fun checkHealthAuthorizationFailureIsTypedAndNotRetried() = runTest {
+        val interceptor = QueueInterceptor(
+            QueuedResult.Http(401, """{"error":{"code":"authorization_failed","message":"unauthorized"}}"""),
+        )
+        val client = client(interceptor)
+
+        val error = runCatching { client.checkHealth() }.exceptionOrNull()
+
+        assertTrue(error is AiProxyException)
+        val proxyError = error as AiProxyException
+        assertEquals(AiProxyEndpoint.Health, proxyError.endpoint)
+        assertEquals(AiProxyErrorType.Authorization, proxyError.type)
+        assertEquals(401, proxyError.statusCode)
+        assertEquals(1, interceptor.requests.size)
+    }
+
+    @Test
+    fun checkHealthProviderUnavailableIsTypedAfterOneRetry() = runTest {
+        val interceptor = QueueInterceptor(
+            QueuedResult.Http(503, """{"status":"unavailable"}"""),
+            QueuedResult.Http(503, """{"status":"unavailable"}"""),
+        )
+        val client = client(interceptor)
+
+        val error = runCatching { client.checkHealth() }.exceptionOrNull()
+
+        assertTrue(error is AiProxyException)
+        val proxyError = error as AiProxyException
+        assertEquals(AiProxyEndpoint.Health, proxyError.endpoint)
+        assertEquals(AiProxyErrorType.ProviderUnavailable, proxyError.type)
+        assertEquals(503, proxyError.statusCode)
+        assertEquals(2, interceptor.requests.size)
+    }
+
+    @Test
+    fun checkHealthTransportFailureIsTypedAfterOneRetry() = runTest {
+        val interceptor = QueueInterceptor(
+            QueuedResult.Failure(IOException("no route to host")),
+            QueuedResult.Failure(IOException("no route to host")),
+        )
+        val client = client(interceptor)
+
+        val error = runCatching { client.checkHealth() }.exceptionOrNull()
+
+        assertTrue(error is AiProxyException)
+        val proxyError = error as AiProxyException
+        assertEquals(AiProxyEndpoint.Health, proxyError.endpoint)
+        assertEquals(AiProxyErrorType.Network, proxyError.type)
+        assertEquals(2, interceptor.requests.size)
+    }
+
     private fun client(interceptor: QueueInterceptor): AiProxyClient =
         AiProxyClient(
             baseUrl = "http://proxy.test/",
@@ -132,9 +199,13 @@ private class QueueInterceptor(
 ) : Interceptor {
     private val pending = ArrayDeque(results.toList())
     val requests = mutableListOf<okhttp3.HttpUrl>()
+    val methods = mutableListOf<String>()
+    val authorizationHeaders = mutableListOf<String?>()
 
     override fun intercept(chain: Interceptor.Chain): Response {
         requests += chain.request().url
+        methods += chain.request().method
+        authorizationHeaders += chain.request().header("Authorization")
         return when (val result = pending.removeFirst()) {
             is QueuedResult.Http -> Response.Builder()
                 .request(chain.request())

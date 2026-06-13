@@ -42,6 +42,7 @@ class ProxySpeechInputController(
 
     private fun AiProxyException.toTranscriptionVoicePrompt(): String =
         when (type) {
+            AiProxyErrorType.ConfigurationMissing -> "语音转写连接未配置，请先在应用首页填写代理地址和 App token。"
             AiProxyErrorType.Authorization -> "语音转写鉴权失败，请检查代理配置。"
             AiProxyErrorType.RateLimited -> "语音转写请求过于频繁，请稍后重试。"
             AiProxyErrorType.ProviderUnavailable -> "语音转写服务暂时不可用，请稍后重试。"

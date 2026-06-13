@@ -344,6 +344,7 @@ class AssistantSessionManager(
 
     private fun AiProxyException.toAssistVoicePrompt(): String =
         when (type) {
+            AiProxyErrorType.ConfigurationMissing -> "AI 服务连接未配置，请先在应用首页填写代理地址和 App token。"
             AiProxyErrorType.Authorization -> "AI 服务鉴权失败，请检查代理配置。"
             AiProxyErrorType.RateLimited -> "AI 服务请求过于频繁，请稍后重试。"
             AiProxyErrorType.ProviderUnavailable -> "AI 服务暂时不可用，请稍后重试。"

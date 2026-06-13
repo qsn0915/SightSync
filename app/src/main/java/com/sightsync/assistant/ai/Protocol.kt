@@ -31,6 +31,13 @@ data class TranscribeResponse(
 )
 
 @Serializable
+data class AiProxyHealthResponse(
+    val status: String,
+    val provider: String? = null,
+    val asrProvider: String? = null,
+)
+
+@Serializable
 data class AssistantAction(
     val type: String,
     val nodeId: String? = null,

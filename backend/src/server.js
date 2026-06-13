@@ -31,13 +31,22 @@ export function createServer(options = {}) {
     : () => createQwenConfig(process.env);
 
   return http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/v1/health') {
+      if (!isAuthorized(req)) {
+        sendError(res, 401, 'authorization_failed', 'unauthorized');
+        return;
+      }
+      sendHealth(res, getQwenConfig());
+      return;
+    }
+
     if (req.method !== 'POST' || !['/v1/assist', '/v1/transcribe'].includes(req.url)) {
-      sendJson(res, 404, { error: 'not found' });
+      sendError(res, 404, 'not_found', 'not found');
       return;
     }
 
     if (!isAuthorized(req)) {
-      sendJson(res, 401, { error: 'unauthorized' });
+      sendError(res, 401, 'authorization_failed', 'unauthorized');
       return;
     }
 
@@ -45,7 +54,7 @@ export function createServer(options = {}) {
     try {
       body = JSON.parse(await readBody(req));
     } catch {
-      sendJson(res, 400, { error: 'invalid json' });
+      sendError(res, 400, 'invalid_json', 'invalid json');
       return;
     }
 
@@ -54,11 +63,11 @@ export function createServer(options = {}) {
       if (req.url === '/v1/transcribe') {
         const requestValidation = validateTranscribeRequest(body);
         if (!requestValidation.valid) {
-          sendJson(res, 400, { error: requestValidation.reason });
+          sendError(res, 400, 'invalid_request', requestValidation.reason);
           return;
         }
         if (!isQwenConfigured(qwenConfig)) {
-          sendJson(res, 503, { error: 'asr provider not configured' });
+          sendError(res, 503, 'provider_unavailable', 'asr provider not configured');
           return;
         }
         const text = await callQwenAsr(body, qwenConfig, fetchImpl, providerTimeoutMillis);
@@ -68,7 +77,7 @@ export function createServer(options = {}) {
 
       const requestValidation = validateAssistRequest(body);
       if (!requestValidation.valid) {
-        sendJson(res, 400, { error: requestValidation.reason });
+        sendError(res, 400, 'invalid_request', requestValidation.reason);
         return;
       }
 
@@ -79,16 +88,16 @@ export function createServer(options = {}) {
       sendJson(res, 200, sanitizeAssistResponse(response));
     } catch (error) {
       if (error instanceof ProviderTimeoutError) {
-        sendJson(res, 504, {
-          error: 'ai provider timeout',
-          detail: error.message
-        });
+        sendError(res, 504, 'provider_timeout', 'ai provider timeout', error.message);
         return;
       }
-      sendJson(res, 502, {
-        error: 'ai response invalid',
-        detail: error instanceof Error ? error.message : String(error)
-      });
+      sendError(
+        res,
+        502,
+        'provider_response_invalid',
+        'ai response invalid',
+        error instanceof Error ? error.message : String(error)
+      );
     }
   });
 }
@@ -177,6 +186,31 @@ function readBody(req) {
 function sendJson(res, statusCode, body) {
   res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
+}
+
+function sendHealth(res, qwenConfig) {
+  if (!isQwenConfigured(qwenConfig)) {
+    sendJson(res, 503, {
+      status: 'unavailable',
+      error: {
+        code: 'provider_unavailable',
+        message: 'ai provider not configured'
+      }
+    });
+    return;
+  }
+
+  sendJson(res, 200, {
+    status: 'ok',
+    provider: 'configured',
+    asrProvider: 'configured'
+  });
+}
+
+function sendError(res, statusCode, code, message, detail) {
+  const error = { code, message };
+  if (detail) error.detail = detail;
+  sendJson(res, statusCode, { error });
 }
 
 class ProviderTimeoutError extends Error {}

@@ -24,19 +24,6 @@ android {
         buildConfig = true
     }
 
-    defaultConfig {
-        buildConfigField(
-            "String",
-            "AI_PROXY_BASE_URL",
-            "\"${providers.gradleProperty("AI_PROXY_BASE_URL").orElse("http://10.0.2.2:8787/").get()}\"",
-        )
-        buildConfigField(
-            "String",
-            "APP_API_TOKEN",
-            "\"${providers.gradleProperty("APP_API_TOKEN").orElse("dev-token").get()}\"",
-        )
-    }
-
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

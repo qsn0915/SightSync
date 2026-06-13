@@ -58,6 +58,16 @@ class AssistantAccessibilityServiceSourceTest {
     }
 
     @Test
+    fun usesSavedAiServiceConnectionConfigInsteadOfBuildConfigProxyDefaults() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+
+        assertTrue(source.contains("AiServiceConnectionConfigStore.create(this).load()"))
+        assertTrue(source.contains("ConfiguredAiProxyClientFactory.create("))
+        assertFalse(source.contains("BuildConfig.AI_PROXY_BASE_URL"))
+        assertFalse(source.contains("BuildConfig.APP_API_TOKEN"))
+    }
+
+    @Test
     fun v2SpeechAcceptanceChecklistDocumentsLongRunningManualChecks() {
         val source = File("../docs/v2-speech-acceptance.md")
 
