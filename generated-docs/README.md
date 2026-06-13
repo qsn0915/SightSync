@@ -6,6 +6,7 @@ Use this folder for future agent-generated documents, including:
 
 - `plans/`: implementation plans and task plans created during development.
 - `handoffs/`: issue handoff notes for follow-up conversations.
+- `applications/`: grant, program, or public-maintenance application drafts.
 - `logs/`: local validation or acceptance logs.
 
 Keep approved SightSync V2 specifications in `docs/superpowers/specs/`. Those specs remain the source of truth referenced by `AGENTS.md`.
