@@ -1,4 +1,4 @@
-﻿package com.sightsync.assistant.core
+package com.sightsync.assistant.core
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
@@ -60,7 +60,8 @@ internal class ScreenContextAssembler(
         root: ScreenNodeSource?,
     ): ScreenContext {
         val nodes = root?.let { nodeTreeExtractor.extract(it) }.orEmpty()
-        val screenshot = if (ScreenContextPolicy.shouldAttachScreenshot(nodes)) {
+        val screenshotPolicy = ScreenContextPolicy.decideScreenshot(nodes)
+        val screenshot = if (screenshotPolicy.attachScreenshot) {
             screenshotProvider.takeScreenshotBase64()
         } else {
             null
@@ -71,6 +72,7 @@ internal class ScreenContextAssembler(
             activityName = activityName,
             nodes = nodes,
             screenshotBase64 = screenshot,
+            screenshotPolicy = screenshotPolicy,
         )
     }
 }

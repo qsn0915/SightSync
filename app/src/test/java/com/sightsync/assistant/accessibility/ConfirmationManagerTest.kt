@@ -49,8 +49,8 @@ class ConfirmationManagerTest {
     }
 
     @Test
-    fun acceptsNaturalConfirmationPhrases() {
-        listOf("好的", "行", "可以", "没问题", "对", "嗯", "执行吧", "弄吧").forEach { utterance ->
+    fun acceptsOnlyExplicitConfirmationPhrases() {
+        listOf("确认", "确认执行", "继续执行", "执行吧").forEach { utterance ->
             val manager = ConfirmationManager()
             val response = AssistResponse(
                 spoken = "我会继续。",
@@ -62,6 +62,23 @@ class ConfirmationManagerTest {
 
             assertEquals("Expected confirmation phrase to be accepted: $utterance", response, pending?.response)
             assertFalse(manager.hasPending)
+        }
+    }
+
+    @Test
+    fun rejectsAmbientOrAmbiguousConfirmationPhrases() {
+        listOf("好的", "行", "可以", "没问题", "对", "嗯", "弄吧", "不确认", "不要确认").forEach { utterance ->
+            val manager = ConfirmationManager()
+            manager.store(
+                AssistResponse(
+                    spoken = "我会继续。",
+                    actions = listOf(AssistantAction(type = "CLICK_NODE", nodeId = "node_ok")),
+                ),
+                screen("com.example"),
+            )
+
+            assertNull("Expected ambiguous phrase to be rejected: $utterance", manager.consumeIfConfirmed(utterance))
+            assertTrue(manager.hasPending)
         }
     }
 

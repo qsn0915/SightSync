@@ -20,13 +20,16 @@ import java.io.IOException
 import java.io.InterruptedIOException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -144,6 +147,67 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun rapidStopStartWaitsForCancelledListenToFinishBeforeRestarting() = runTest {
+        val speech = DelayedCancellationSpeechInput()
+        val manager = manager(FakeSpeechOutput(), speech)
+
+        manager.startContinuousListening()
+        speech.firstListenStarted.await()
+
+        manager.stopContinuousListening()
+        manager.startContinuousListening()
+        runCurrent()
+
+        assertEquals(1, speech.listenCalls)
+        assertEquals(1, speech.maxConcurrentListens)
+
+        speech.allowFirstCleanup.complete(Unit)
+        runCurrent()
+
+        assertEquals(2, speech.listenCalls)
+        assertEquals(1, speech.maxConcurrentListens)
+        manager.stopContinuousListening()
+        runCurrent()
+    }
+
+    @Test
+    fun rapidRestartDoesNotSpeakObsoleteStoppedPrompt() = runTest {
+        val tts = FakeSpeechOutput()
+        val speech = DelayedCancellationSpeechInput()
+        val manager = manager(tts, speech)
+
+        manager.startContinuousListening()
+        speech.firstListenStarted.await()
+        manager.stopContinuousListening()
+        manager.startContinuousListening()
+        runCurrent()
+
+        assertFalse(tts.spoken.contains("已停止聆听。"))
+
+        speech.allowFirstCleanup.complete(Unit)
+        runCurrent()
+        manager.stopContinuousListening()
+        runCurrent()
+    }
+
+    @Test
+    fun disposeCancelsVoiceWithoutSpeakingStoppedPrompt() = runTest {
+        val tts = FakeSpeechOutput()
+        val speech = FakeSpeechInput()
+        val manager = manager(tts, speech)
+
+        manager.startContinuousListening()
+        speech.listenStarted.await()
+        manager.dispose()
+        runCurrent()
+
+        assertTrue(speech.cancelCalled)
+        assertTrue(tts.stopCalled)
+        assertFalse(tts.spoken.contains("已停止聆听。"))
+        assertFalse(manager.isContinuousListening)
+    }
+
+    @Test
     fun continuousStopCommandDoesNotCallAi() = runTest {
         val tts = FakeSpeechOutput()
         val speech = FakeSpeechInput(SpeechInputResult.Recognized("暂停助手"))
@@ -181,7 +245,10 @@ class AssistantSessionManagerPhase2Test {
     fun continuousNoSpeechResultKeepsListeningWithoutRepeatedFailurePrompt() = runTest {
         val tts = FakeSpeechOutput()
         val speech = FakeSpeechInput(
-            SpeechInputResult.Failed("我没有听清，请再说一次。"),
+            SpeechInputResult.Failed(
+                message = "我没有听清，请再说一次。",
+                kind = com.sightsync.assistant.speech.SpeechInputFailureKind.NoSpeech,
+            ),
             SpeechInputResult.Recognized("停止聆听"),
         )
         val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
@@ -193,6 +260,66 @@ class AssistantSessionManagerPhase2Test {
         assertFalse(tts.spoken.contains("我没有听清，请再说一次。"))
         assertTrue(ai.utterances.isEmpty())
         assertFalse(manager.isContinuousListening)
+    }
+
+    @Test
+    fun continuousListeningIgnoresAmbientUtteranceWithoutCollectingScreenOrCallingAi() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val logger = FakeDiagnosticLogger()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("炮塔被摧毁。"),
+                SpeechInputResult.Recognized("停止聆听"),
+            ),
+            screen = screen,
+            ai = ai,
+            diagnosticLogger = logger,
+        )
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertFalse(tts.spoken.contains("正在查看当前屏幕。"))
+        assertTrue(logger.messages.any { it.contains("Continuous utterance ignored reason=not_explicit_command") })
+        assertFalse(manager.isContinuousListening)
+    }
+
+    @Test
+    fun continuousListeningCanonicalizesObservedReadScreenVariant() = runTest {
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "可操作项。"))
+        val manager = manager(
+            tts = FakeSpeechOutput(),
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("只说明可操作性。"),
+                SpeechInputResult.Recognized("停止聆听"),
+            ),
+            ai = ai,
+        )
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertEquals(listOf("只说明可操作项"), ai.utterances)
+    }
+
+    @Test
+    fun oneShotUnknownUtteranceStillCallsAi() = runTest {
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "回答。"))
+        val manager = manager(
+            tts = FakeSpeechOutput(),
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("这句话是什么意思")),
+            ai = ai,
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(listOf("这句话是什么意思"), ai.utterances)
     }
 
     @Test
@@ -298,6 +425,94 @@ class AssistantSessionManagerPhase2Test {
         advanceUntilIdle()
 
         assertTrue(tts.spoken.contains("AI 服务暂时不可用，请稍后重试。"))
+    }
+
+    @Test
+    fun aiProviderUnavailableLogsFailureType() = runTest {
+        val tts = FakeSpeechOutput()
+        val logger = FakeDiagnosticLogger()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("这里有什么")),
+            ai = FakeAssistantClient(error = aiProxyError(AiProxyErrorType.ProviderUnavailable, statusCode = 503)),
+            diagnosticLogger = logger,
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(logger.messages.contains("SightSyncSession: Assist failed type=ProviderUnavailable status=503"))
+    }
+
+    @Test
+    fun continuousProviderUnavailablePausesAfterSecondConsecutiveServiceFailure() = runTest {
+        val tts = FakeSpeechOutput()
+        val speech = FakeSpeechInput(
+            SpeechInputResult.Recognized("这里有什么"),
+            SpeechInputResult.Recognized("再读一次"),
+        )
+        val ai = FakeAssistantClient(error = aiProxyError(AiProxyErrorType.ProviderUnavailable, statusCode = 503))
+        val manager = manager(tts = tts, speech = speech, ai = ai)
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertEquals(listOf("这里有什么", "再读一次"), ai.utterances)
+        assertEquals(1, tts.spoken.count { it == "AI 服务暂时不可用，请稍后重试。" })
+        assertTrue(tts.spoken.contains("服务仍不可用，已暂停连续聆听，请检查连接后再开启。"))
+        assertFalse(manager.isContinuousListening)
+    }
+
+    @Test
+    fun continuousTranscriptionNetworkFailurePausesAfterSecondConsecutiveFailure() = runTest {
+        val tts = FakeSpeechOutput()
+        val failure = "语音转写网络不可用，请检查网络后重试。"
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Failed(
+                    message = failure,
+                    kind = com.sightsync.assistant.speech.SpeechInputFailureKind.Network,
+                ),
+                SpeechInputResult.Failed(
+                    message = failure,
+                    kind = com.sightsync.assistant.speech.SpeechInputFailureKind.Network,
+                ),
+            ),
+        )
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertEquals(1, tts.spoken.count { it == failure })
+        assertTrue(tts.spoken.contains("服务仍不可用，已暂停连续聆听，请检查连接后再开启。"))
+        assertFalse(manager.isContinuousListening)
+    }
+
+    @Test
+    fun ambientAffirmationDoesNotConfirmPendingHighRiskAction() = runTest {
+        val actions = FakeActionRunner()
+        val manager = manager(
+            tts = FakeSpeechOutput(),
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("发送这条消息"),
+                SpeechInputResult.Recognized("嗯"),
+                SpeechInputResult.Recognized("停止聆听"),
+            ),
+            ai = FakeAssistantClient(
+                response = AssistResponse(
+                    spoken = "我会发送这条消息。",
+                    actions = listOf(AssistantAction(type = "CLICK_NODE", nodeId = "node_send")),
+                ),
+            ),
+            actions = actions,
+        )
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertTrue(actions.executions.isEmpty())
+        assertFalse(manager.isContinuousListening)
     }
 
     @Test
@@ -959,7 +1174,7 @@ class AssistantSessionManagerPhase2Test {
 
     private fun TestScope.manager(
         tts: SpeechOutput,
-        speech: FakeSpeechInput,
+        speech: SpeechInput,
         screen: FakeScreenContextProvider = FakeScreenContextProvider(),
         ai: FakeAssistantClient = FakeAssistantClient(response = AssistResponse(spoken = "好的。")),
         actions: FakeActionRunner = FakeActionRunner(),
@@ -979,6 +1194,34 @@ class AssistantSessionManagerPhase2Test {
             diagnosticLogger = diagnosticLogger,
         )
     }
+}
+
+private class DelayedCancellationSpeechInput : SpeechInput {
+    val firstListenStarted = CompletableDeferred<Unit>()
+    val allowFirstCleanup = CompletableDeferred<Unit>()
+    var listenCalls = 0
+    var maxConcurrentListens = 0
+    private var activeListens = 0
+
+    override suspend fun listenOnce(): SpeechInputResult {
+        listenCalls += 1
+        val call = listenCalls
+        activeListens += 1
+        maxConcurrentListens = maxOf(maxConcurrentListens, activeListens)
+        if (call == 1) firstListenStarted.complete(Unit)
+        return try {
+            awaitCancellation()
+        } finally {
+            if (call == 1) {
+                withContext(NonCancellable) {
+                    allowFirstCleanup.await()
+                }
+            }
+            activeListens -= 1
+        }
+    }
+
+    override fun cancel() = Unit
 }
 
 private class GateSpeechOutput : SpeechOutput {
@@ -1059,6 +1302,7 @@ private class FakeScreenContextProvider(
         collectCount += 1
         return pendingContexts.removeFirstOrNull() ?: screenContext()
     }
+
 }
 
 private class FakeAssistantClient(

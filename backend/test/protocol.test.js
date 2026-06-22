@@ -4,7 +4,9 @@ import {
   validateAssistRequest,
   validateAssistResponse,
   validateTranscribeRequest,
-  createFallbackAssistResponse
+  createFallbackAssistResponse,
+  detectScreenReadingMode,
+  validateScreenReadingProviderResponse
 } from '../src/protocol.js';
 
 test('validateAssistRequest accepts minimal valid request', () => {
@@ -61,17 +63,103 @@ test('createFallbackAssistResponse describes current page without actions', () =
     utterance: '这里有什么',
     screen: {
       nodes: [
-        { text: '设置', role: 'TextView' },
-        { text: 'WLAN', role: 'Button', clickable: true },
-        { text: '蓝牙', role: 'Button', clickable: true }
+        { nodeId: 'node_settings', text: '设置', role: 'TextView' },
+        { nodeId: 'node_wlan', text: 'WLAN', role: 'Button', clickable: true },
+        { nodeId: 'node_bluetooth', text: '蓝牙', role: 'Button', clickable: true }
       ]
     }
   });
 
   assert.equal(response.requiresConfirmation, false);
   assert.deepEqual(response.actions, []);
+  assert.match(response.spoken, /页面主题/);
+  assert.match(response.spoken, /主要内容/);
+  assert.match(response.spoken, /可操作项/);
   assert.match(response.spoken, /设置/);
   assert.match(response.spoken, /WLAN/);
+});
+
+test('createFallbackAssistResponse supports screen reading modes without actions', () => {
+  const screen = {
+    nodes: [
+      { nodeId: 'node_settings', text: '设置', role: 'TextView' },
+      { nodeId: 'node_wlan', text: 'WLAN', role: 'Button', clickable: true, actionableType: 'click', region: 'top' },
+      {
+        nodeId: 'node_search',
+        contentDescription: '搜索设置',
+        role: 'EditText',
+        editable: true,
+        actionableType: 'input',
+        inputContext: '设置搜索框',
+        region: 'top'
+      }
+    ]
+  };
+
+  const brief = createFallbackAssistResponse({ utterance: '简短读屏', screen });
+  const detailed = createFallbackAssistResponse({ utterance: '详细读一下当前页面', screen });
+  const actionsOnly = createFallbackAssistResponse({ utterance: '只说明可操作项', screen });
+
+  assert.deepEqual(brief.actions, []);
+  assert.deepEqual(detailed.actions, []);
+  assert.deepEqual(actionsOnly.actions, []);
+  assert.match(brief.spoken, /^智能总结暂不可用，先为你朗读当前可见内容。/);
+  assert.match(detailed.spoken, /^智能总结暂不可用，先为你朗读当前可见内容。/);
+  assert.match(actionsOnly.spoken, /^智能总结暂不可用，先为你朗读当前可见内容。/);
+  assert.match(brief.spoken, /简短读屏/);
+  assert.doesNotMatch(brief.spoken, /可操作项/);
+  assert.match(detailed.spoken, /详细读屏/);
+  assert.match(detailed.spoken, /设置搜索框/);
+  assert.match(actionsOnly.spoken, /可操作项/);
+  assert.match(actionsOnly.spoken, /WLAN/);
+  assert.doesNotMatch(actionsOnly.spoken, /主要内容/);
+});
+
+test('detectScreenReadingMode recognizes fixed reading commands only', () => {
+  assert.equal(detectScreenReadingMode('简短读屏'), 'brief');
+  assert.equal(detectScreenReadingMode('详细读屏。'), 'detailed');
+  assert.equal(detectScreenReadingMode('只说明可操作项'), 'actions');
+  assert.equal(detectScreenReadingMode('这里有什么'), 'standard');
+  assert.equal(detectScreenReadingMode('点击 WLAN'), null);
+});
+
+test('validateScreenReadingProviderResponse rejects actions and technical output', () => {
+  const summary = {
+    mainContent: ['设置', 'WLAN'],
+    actionableItems: [{ label: 'WLAN' }]
+  };
+
+  assert.equal(validateScreenReadingProviderResponse({
+    spoken: '当前页面是设置。',
+    requiresConfirmation: false,
+    actions: [{ type: 'CLICK_NODE', nodeId: 'wlan' }]
+  }, summary).valid, false);
+
+  assert.equal(validateScreenReadingProviderResponse({
+    spoken: '发现 android.widget.Button 和 node_12。',
+    requiresConfirmation: false,
+    actions: []
+  }, summary).valid, false);
+});
+
+
+test('validateScreenReadingProviderResponse allows source names but rejects excessive unknown english', () => {
+  const summary = {
+    mainContent: ['设置', '蓝心 AI', 'Wi-Fi', 'WLAN'],
+    actionableItems: [{ label: 'Bluetooth' }]
+  };
+
+  assert.equal(validateScreenReadingProviderResponse({
+    spoken: '这是设置页面，可以进入蓝心 AI、Wi-Fi、WLAN 和 Bluetooth。',
+    requiresConfirmation: false,
+    actions: []
+  }, summary).valid, true);
+
+  assert.equal(validateScreenReadingProviderResponse({
+    spoken: 'This Settings Control Debug Panel 当前不可用。',
+    requiresConfirmation: false,
+    actions: []
+  }, summary).valid, false);
 });
 
 test('createFallbackAssistResponse clicks a unique named target', () => {

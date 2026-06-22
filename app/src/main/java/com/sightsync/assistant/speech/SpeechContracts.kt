@@ -2,8 +2,26 @@ package com.sightsync.assistant.speech
 
 sealed class SpeechInputResult {
     data class Recognized(val text: String) : SpeechInputResult()
-    data class Failed(val message: String) : SpeechInputResult()
+    data class Failed(
+        val message: String,
+        val kind: SpeechInputFailureKind = SpeechInputFailureKind.Unknown,
+        val statusCode: Int? = null,
+    ) : SpeechInputResult()
     data object Cancelled : SpeechInputResult()
+}
+
+enum class SpeechInputFailureKind {
+    Unknown,
+    NoSpeech,
+    Permission,
+    Configuration,
+    Authorization,
+    RateLimited,
+    ProviderUnavailable,
+    Timeout,
+    Network,
+    Recorder,
+    ResponseInvalid,
 }
 
 interface SpeechInput {

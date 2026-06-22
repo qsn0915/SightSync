@@ -14,12 +14,12 @@
   - 【详细计划文档】：先在 `generated-docs/plans/` 写独立计划文档，明确文件范围、TDD 步骤、安全边界和验收方式；文档写完后必须严格根据该详细计划逐步执行，如需偏离计划，先说明原因并更新计划或征求用户确认。
 - 每次 App 层代码修改后，按项目约束在本机 Android 虚拟机或真机验证；如果设备不可用，必须记录阻塞原因。
 - 高危行为在当前长期计划内先不执行，包括支付、转账、输入密码、输入验证码、银行卡、身份证敏感提交、删除不可恢复内容。
-- 采用个人云代理作为长期独立运行方案：手机只保存代理地址和 App token，真实 AI API key 保存在云端代理。
+- 个人云代理仍作为长期独立运行方向，但当前先使用电脑后端代理验收：手机只保存代理地址和 App token，真实 AI API key 不进入 Android App；云端部署和真机断开电脑验收后续再恢复。
 - `D:\文档\SightSync改进建议.md` 作为参考来源，不整包采纳；只在对应小片需要时评估其中建议。
 
 ## 当前进度
 
-截至 2026-06-13：
+截至 2026-06-22：
 
 - Phase 1 小片 1 已完成：确认/取消词扩展、手机号/身份证/邮箱脱敏、节点 bounds 校验。
 - Phase 1 小片 2 已完成：TTS pending utterance registry，降低 `UtteranceProgressListener` 多线程回调导致的状态风险。
@@ -32,7 +32,14 @@
 - Phase 2 小片 2 已完成：新增 App 内 AI 服务连接配置 UI，支持代理地址、App token 输入与保存，并提供连接测试入口和当前连接状态展示；真实代理健康检查留到小片 3 接入。
 - Phase 2 小片 3 已完成：后端代理新增鉴权健康检查端点，并将鉴权、请求校验、provider 不可用、provider 超时和 provider 响应异常归一化为稳定错误码。
 - Phase 2 小片 4 已完成：App 运行时改为读取本地保存的代理地址和 App token，连接测试接入后端 `/v1/health`，无障碍服务不再依赖固定 `BuildConfig.AI_PROXY_BASE_URL` / `BuildConfig.APP_API_TOKEN`。
-- Phase 2 小片 5 准备中：已将当前工作区 debug build 更新到真机 `10AC7Z0290001EF`，并写入断开电脑验收计划；连接电脑本地代理的日志复盘见 `generated-docs/acceptance/2026-06-13-phase2-connected-phone-local-proxy-log-review.md`，当前仅证明录音和 ASR 代理链路工作，仍等待低风险动作证据和断开电脑语音链路验收。
+- Phase 2 小片 5 已按用户指示调整：暂不进行真机断开电脑测试，先使用电脑后端代理验收；连接电脑本地代理的日志复盘见 `generated-docs/acceptance/2026-06-13-phase2-connected-phone-local-proxy-log-review.md`。
+- Phase 3 小片 1 已完成：新增后端 `screen_summary_v2` 摘要协议，本地读屏 fallback 和 Qwen prompt 改为围绕页面主题、主要内容、可操作项和风险提示组织回答。
+- Phase 3 小片 2 已完成：Android 节点树提取新增层级、父节点、区域、可操作类型、滚动容器和输入框上下文元数据，后端 `screen_summary_v2` 保留这些字段用于读屏摘要和 prompt。
+- Phase 3 小片 3 已完成：后端读屏 fallback 和 Qwen prompt 支持简短读屏、详细读屏和只说明可操作项三种模式；明确读屏模式命令仍只朗读、不执行动作。
+- Phase 3 小片 4 已完成：截图辅助理解策略改为带原因的 Android 隐私决策；节点树不足时才请求截图，敏感或已脱敏内容会阻断截图，并把截图策略原因传给后端摘要和 prompt。
+- Phase 3 小片 5 已执行阶段验收并于 2026-06-21 完成真机复验：自动化测试、后端 fixture、Android 单元测试和 debug 构建通过；修复版 App 已安装，电脑后端显式使用用户批准的 `qwen3.7-plus`，真实 provider probe、transcribe 和 assist 均可用，五类页面播报内容经用户确认“大致正确”，因此 Phase 3 屏幕理解内容质量通过。但 5 条预期指令期间记录到 13 条 ASR utterance，至少 8 条为环境声误触发，另有 2 次转写网络失败；“只说明可操作项”还被识别为“只说明可操作性”。Phase 3 整体阶段验收仍未通过，不能进入 Phase 4。下一修复小片聚焦连续聆听环境声误触发抑制、固定读屏命令容错和转写失败诊断；完整复验记录见 `generated-docs/acceptance/2026-06-21-phase3-runtime-reacceptance.md`。
+- Phase 3 连续命令门修复已完成 TDD、完整测试、构建、覆盖安装和真机复验：环境语音可被静默忽略，固定读屏误转写别名已归一化，provider/转写服务错误风暴未复现。但阶段验收暴露两个新阻塞：明确读屏命令被本地规则提前截获，只拼接无障碍节点标签，导致详细模式混入英文、简短模式不构成有效语义概括；同一 App 进程还出现两条重叠录音循环，存在 TTS/ASR 串扰。Phase 3 仍未通过，Phase 4 继续冻结。下一修复小片必须先用详细计划处理读屏路由/标签质量和连续聆听单实例生命周期，再复验三种读屏模式；证据见 `generated-docs/acceptance/2026-06-21-phase3-runtime-reacceptance.md`。
+- Phase 3 读屏质量与连续聆听单实例修复已完成：读屏改为经清洗摘要的 provider-first 路由，未知技术英文和不安全响应会降级；快速停开真机日志未再出现重叠录音 generation。后端 51 个测试、Android 单元测试、debug 构建和 `git diff --check` 通过，修复版 App 已覆盖安装。用户确认五类页面验收与修复后读屏验收已完成，Phase 3 以“通过但保留已知风险”收口，Phase 4 解冻。已知风险为“简短读屏”偶发无响应，根因尚无完整日志证据，已按用户要求暂缓并记录在 `generated-docs/handoffs/2026-06-22-phase3-intermittent-no-response-after-brief-alias-fix.md`；最终验收证据见 `generated-docs/acceptance/2026-06-21-phase3-runtime-reacceptance.md`。
 
 ## Phase 1：稳定性和安全底座
 
@@ -55,9 +62,9 @@ Phase 1 验收门槛：
 - Android 虚拟机或真机安装 debug APK 后，无障碍服务可启用，连续聆听通知和悬浮窗可见，最近 logcat 无 SightSync 崩溃。
 - 人工或半自动验收覆盖：停止/取消语义、TTS 被打断、网络错误反馈、敏感字段脱敏、高风险页面拒绝执行。
 
-## Phase 2：脱离电脑运行
+## Phase 2：电脑后端代理验收
 
-目标：手机脱离电脑，通过个人云代理完成 ASR、屏幕理解和动作规划。
+目标：先通过电脑后端代理完成 ASR、屏幕理解和动作规划的端到端验收；云端部署和真机断开电脑独立运行暂缓，后续再恢复。
 
 小片：
 
@@ -65,13 +72,14 @@ Phase 1 验收门槛：
 2. 【短执行计划】配置 UI：代理地址、App token、连接测试、当前连接状态。
 3. 【详细计划文档】后端代理健康检查、鉴权、错误归一化。
 4. 【详细计划文档】App 使用动态代理配置，替代固定 `BuildConfig.AI_PROXY_BASE_URL` 作为唯一入口。
-5. 【详细计划文档】Phase 2 阶段验收：真机断开电脑后完整跑通语音链路。
+5. 【详细计划文档】Phase 2 阶段验收：真机连接电脑后端代理完整跑通语音链路；暂不要求断开电脑或云端代理。
 
 Phase 2 验收门槛：
 
 - App 首次安装后可以配置代理地址和 App token。
 - 连接测试能区分成功、鉴权失败、代理不可达、provider 不可用。
-- 真机不连接电脑、不使用 `adb reverse` 时，能完成至少一次语音转写、读屏请求和低风险动作。
+- 真机使用电脑后端代理时，能完成至少一次语音转写、读屏请求和低风险动作；当前阶段允许使用 `adb reverse` 或同等本机代理连接方式。
+- 真机断开电脑、云端代理独立运行不作为当前 Phase 2 通过条件，后续恢复云端计划时再单独验收。
 - App 内不保存第三方 AI provider 的真实 API key。
 - 后端日志不得输出用户 token、真实 AI key、完整截图 base64 或未脱敏敏感字段。
 

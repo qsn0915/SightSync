@@ -33,20 +33,14 @@ class ConfirmationManager {
         cancellationPhrases.any(utterance::contains)
 
     private fun isConfirmation(utterance: String): Boolean =
-        confirmationPhrases.any(utterance::contains)
+        utterance.trim().trimEnd('。', '.', '！', '!', '？', '?') in confirmationPhrases
 
     private companion object {
-        val confirmationPhrases = listOf(
+        val confirmationPhrases = setOf(
             "确认",
+            "确认执行",
             "继续执行",
-            "好的",
-            "行",
-            "可以",
-            "没问题",
-            "对",
-            "嗯",
             "执行吧",
-            "弄吧",
         )
 
         val cancellationPhrases = listOf(

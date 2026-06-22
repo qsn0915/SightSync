@@ -63,6 +63,152 @@ test('GET /v1/health returns ok when provider is configured', async () => {
   }
 });
 
+test('GET /v1/health?probe=provider returns provider unavailable when configured provider rejects', async () => {
+  const { server, baseUrl } = await listen({
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.6-plus',
+      asrModel: 'qwen3-asr-flash'
+    },
+    fetchImpl: async () => ({
+      ok: false,
+      status: 403,
+      json: async () => ({})
+    })
+  });
+  try {
+    const response = await fetch(`${baseUrl}/v1/health?probe=provider`, {
+      headers: { 'Authorization': 'Bearer dev-token' }
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 503);
+    assert.equal(body.status, 'unavailable');
+    assert.deepEqual(body.error, {
+      code: 'provider_unavailable',
+      message: 'ai provider probe failed',
+      detail: 'provider returned 403'
+    });
+  } finally {
+    await close(server);
+  }
+});
+
+test('GET /v1/health?probe=provider returns ok when configured provider answers valid protocol', async () => {
+  let capturedOptions;
+  const { server, baseUrl } = await listen({
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.7-plus',
+      asrModel: 'qwen3-asr-flash'
+    },
+    fetchImpl: async (_url, options) => {
+      capturedOptions = options;
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: '{"spoken":"provider ok","requiresConfirmation":false,"actions":[]}'
+              }
+            }
+          ]
+        })
+      };
+    }
+  });
+  try {
+    const response = await fetch(`${baseUrl}/v1/health?probe=provider`, {
+      headers: { 'Authorization': 'Bearer dev-token' }
+    });
+    const body = await response.json();
+    const providerBody = JSON.parse(capturedOptions.body);
+
+    assert.equal(response.status, 200);
+    assert.equal(providerBody.model, 'qwen3.7-plus');
+    assert.deepEqual(body, {
+      status: 'ok',
+      provider: 'configured',
+      asrProvider: 'configured',
+      providerProbe: 'ok',
+      model: 'qwen3.7-plus',
+      asrModel: 'qwen3-asr-flash'
+    });
+  } finally {
+    await close(server);
+  }
+});
+
+test('request diagnostics redact tokens, provider keys, audio and screenshot bodies', async () => {
+  const logs = [];
+  const { server, baseUrl } = await listen({
+    logger: {
+      info: (...args) => logs.push(args),
+      error: (...args) => logs.push(args)
+    },
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.7-plus',
+      asrModel: 'qwen3-asr-flash'
+    },
+    fetchImpl: async () => ({
+      ok: false,
+      status: 403,
+      json: async () => ({})
+    })
+  });
+  try {
+    await fetch(`${baseUrl}/v1/assist`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer dev-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        ...validRequest(),
+        utterance: '详细读屏',
+        screen: {
+          ...validRequest().screen,
+          nodes: [{ nodeId: 'private', text: 'PRIVATE_NODE_TEXT_SHOULD_NOT_APPEAR', role: 'TextView' }],
+          screenshotBase64: 'SCREEN_BASE64_SHOULD_NOT_APPEAR'
+        }
+      })
+    });
+
+    await fetch(`${baseUrl}/v1/transcribe`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer dev-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        locale: 'zh-CN',
+        mimeType: 'audio/mp4',
+        audioBase64: 'AUDIO_BASE64_SHOULD_NOT_APPEAR'
+      })
+    });
+
+    const serializedLogs = JSON.stringify(logs);
+    assert.match(serializedLogs, /requestId/);
+    assert.match(serializedLogs, /\/v1\/assist/);
+    assert.match(serializedLogs, /\/v1\/transcribe/);
+    assert.match(serializedLogs, /qwen3\.7-plus/);
+    assert.match(serializedLogs, /local_fallback/);
+    assert.match(serializedLogs, /provider_http_error/);
+    assert.doesNotMatch(serializedLogs, /dev-token/);
+    assert.doesNotMatch(serializedLogs, /test-qwen-key/);
+    assert.doesNotMatch(serializedLogs, /PRIVATE_NODE_TEXT_SHOULD_NOT_APPEAR/);
+    assert.doesNotMatch(serializedLogs, /SCREEN_BASE64_SHOULD_NOT_APPEAR/);
+    assert.doesNotMatch(serializedLogs, /AUDIO_BASE64_SHOULD_NOT_APPEAR/);
+  } finally {
+    await close(server);
+  }
+});
+
 test('POST /v1/assist requires bearer token', async () => {
   const { server, baseUrl } = await listen();
   try {
@@ -97,6 +243,7 @@ test('POST /v1/assist returns fallback response when provider is not configured'
     assert.equal(response.status, 200);
     assert.equal(body.requiresConfirmation, false);
     assert.deepEqual(body.actions, []);
+    assert.match(body.spoken, /^智能总结暂不可用，先为你朗读当前可见内容。/);
     assert.match(body.spoken, /WLAN/);
   } finally {
     await close(server);
@@ -211,7 +358,7 @@ test('POST /v1/assist handles clear local commands before calling provider', asy
   }
 });
 
-test('POST /v1/assist handles screen reading locally before calling provider', async () => {
+test('POST /v1/assist uses configured provider for screen reading', async () => {
   let fetchCalls = 0;
   const { server, baseUrl } = await listen({
     qwenConfig: {
@@ -227,7 +374,7 @@ test('POST /v1/assist handles screen reading locally before calling provider', a
           choices: [
             {
               message: {
-                content: '{"spoken":"不应调用 provider。","requiresConfirmation":false,"actions":[]}'
+                content: '{"spoken":"这是设置页面，主要入口包括 WLAN。","requiresConfirmation":false,"actions":[]}'
               }
             }
           ]
@@ -257,11 +404,152 @@ test('POST /v1/assist handles screen reading locally before calling provider', a
     const body = await response.json();
 
     assert.equal(response.status, 200);
-    assert.equal(fetchCalls, 0);
+    assert.equal(fetchCalls, 1);
     assert.equal(body.requiresConfirmation, false);
     assert.deepEqual(body.actions, []);
-    assert.match(body.spoken, /设置/);
-    assert.match(body.spoken, /WLAN/);
+    assert.equal(body.spoken, '这是设置页面，主要入口包括 WLAN。');
+  } finally {
+    await close(server);
+  }
+});
+
+test('POST /v1/assist falls back when provider screen reading response is unsafe', async () => {
+  const unsafeResponses = [
+    '{"spoken":"我会点击 WLAN。","requiresConfirmation":false,"actions":[{"type":"CLICK_NODE","nodeId":"node_wlan"}]}',
+    '{"spoken":"发现 android.widget.Button 和 node_12。","requiresConfirmation":false,"actions":[]}',
+    '{"spoken":"This Settings Control Debug Panel 当前不可用。","requiresConfirmation":false,"actions":[]}'
+  ];
+
+  for (const content of unsafeResponses) {
+    const { server, baseUrl } = await listen({
+      qwenConfig: {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+        apiKey: 'test-qwen-key',
+        model: 'qwen3.7-plus'
+      },
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({ choices: [{ message: { content } }] })
+      })
+    });
+    try {
+      const response = await fetch(`${baseUrl}/v1/assist`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer dev-token',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          ...validRequest(),
+          utterance: '详细读屏',
+          screen: {
+            ...validRequest().screen,
+            nodes: [
+              { nodeId: 'title', text: '设置', role: 'TextView' },
+              { nodeId: 'node_wlan', text: 'WLAN', role: 'Button', clickable: true }
+            ]
+          }
+        })
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(body.actions, []);
+      assert.match(body.spoken, /^智能总结暂不可用，先为你朗读当前可见内容。/);
+      assert.doesNotMatch(body.spoken, /android\.widget|node_12|This Settings Control/);
+    } finally {
+      await close(server);
+    }
+  }
+});
+
+test('POST /v1/assist falls back when screen reading provider returns 403', async () => {
+  const logs = [];
+  const { server, baseUrl } = await listen({
+    logger: { info: (...args) => logs.push(args) },
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.7-plus'
+    },
+    fetchImpl: async () => ({ ok: false, status: 403, json: async () => ({}) })
+  });
+  try {
+    const response = await fetch(`${baseUrl}/v1/assist`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer dev-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ...validRequest(), utterance: '简短读屏' })
+    });
+    const body = await response.json();
+    const serializedLogs = JSON.stringify(logs);
+
+    assert.equal(response.status, 200);
+    assert.match(body.spoken, /^智能总结暂不可用，先为你朗读当前可见内容。/);
+    assert.match(serializedLogs, /"assistSource":"local_fallback"/);
+    assert.match(serializedLogs, /"fallbackReason":"provider_http_error"/);
+    assert.match(serializedLogs, /"providerStatus":403/);
+  } finally {
+    await close(server);
+  }
+});
+
+test('POST /v1/assist falls back when screen reading provider times out', async () => {
+  const { server, baseUrl } = await listen({
+    providerTimeoutMillis: 10,
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.7-plus'
+    },
+    fetchImpl: async () => new Promise(() => {})
+  });
+  try {
+    const response = await fetch(`${baseUrl}/v1/assist`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer dev-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ...validRequest(), utterance: '详细读屏' })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.match(body.spoken, /^智能总结暂不可用，先为你朗读当前可见内容。/);
+  } finally {
+    server.closeAllConnections?.();
+    await close(server);
+  }
+});
+
+test('POST /v1/assist falls back when screen reading provider returns invalid JSON', async () => {
+  const { server, baseUrl } = await listen({
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.7-plus'
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: '{invalid-json' } }] })
+    })
+  });
+  try {
+    const response = await fetch(`${baseUrl}/v1/assist`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer dev-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ...validRequest(), utterance: '只说明可操作项' })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.match(body.spoken, /^智能总结暂不可用，先为你朗读当前可见内容。/);
   } finally {
     await close(server);
   }

@@ -68,6 +68,22 @@ class AssistantAccessibilityServiceSourceTest {
     }
 
     @Test
+    fun repeatedServiceConnectionReusesInitializedControllers() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+
+        assertTrue(source.contains("if (::sessionManager.isInitialized) {"))
+        assertTrue(source.contains("Reusing initialized accessibility service controllers"))
+    }
+
+    @Test
+    fun serviceDestroyDisposesSessionWithoutStopAnnouncement() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+
+        assertTrue(source.contains("sessionManager.dispose()"))
+        assertFalse(source.contains("onDestroy()\n        if (::sessionManager.isInitialized) sessionManager.stopContinuousListening()"))
+    }
+
+    @Test
     fun v2SpeechAcceptanceChecklistDocumentsLongRunningManualChecks() {
         val source = File("../docs/v2-speech-acceptance.md")
 

@@ -1,3 +1,5 @@
+import { buildScreenSummary, buildScreenSummarySpoken } from './screen-summary.js';
+
 const ALLOWED_ACTIONS = new Set([
   'SPEAK',
   'CLICK_NODE',
@@ -8,6 +10,7 @@ const ALLOWED_ACTIONS = new Set([
   'GLOBAL_HOME',
   'OPEN_APP'
 ]);
+
 
 const ALLOWED_AUDIO_MIME_TYPES = new Set([
   'audio/mp4',
@@ -84,8 +87,6 @@ export function createLocalAssistResponse(request) {
   const utterance = typeof request?.utterance === 'string' ? request.utterance.trim() : '';
   if (!utterance) return null;
 
-  if (isScreenReadingCommand(utterance)) return createScreenReadingResponse(request);
-
   const direct = createDirectActionResponse(utterance);
   if (direct) return direct;
 
@@ -102,30 +103,26 @@ export function createFallbackAssistResponse(request) {
   const localResponse = createLocalAssistResponse(request);
   if (localResponse) return localResponse;
 
-  return createScreenReadingResponse(request);
+  return createScreenReadingFallbackResponse(request);
 }
 
-function createScreenReadingResponse(request) {
-  const nodes = Array.isArray(request?.screen?.nodes) ? request.screen.nodes : [];
-  const labels = nodes
-    .map((node) => node.text || node.contentDescription)
-    .filter((value) => typeof value === 'string' && value.trim().length > 0)
-    .slice(0, 8);
-
-  const spoken = labels.length > 0
-    ? `当前页面包含：${labels.join('，')}。`
-    : '我暂时没有读取到当前页面的主要文字。';
-
+export function createScreenReadingFallbackResponse(request, requestedMode) {
+  const mode = requestedMode || detectScreenReadingMode(request?.utterance) || 'standard';
+  const summary = buildScreenSummary(request?.screen);
   return {
-    spoken,
+    spoken: buildScreenSummarySpoken(summary, { mode, degraded: true }),
     requiresConfirmation: false,
     actions: []
   };
 }
 
-function isScreenReadingCommand(utterance) {
+export function detectScreenReadingMode(utterance) {
   const normalized = normalize(utterance);
-  return [
+
+  if (isActionItemsReadingCommand(normalized)) return 'actions';
+  if (isDetailedReadingCommand(normalized)) return 'detailed';
+  if (isBriefReadingCommand(normalized)) return 'brief';
+  if ([
     '这里有什么',
     '当前页面有什么',
     '读一下当前页面',
@@ -134,6 +131,67 @@ function isScreenReadingCommand(utterance) {
     '看一下当前屏幕',
     '查看当前屏幕',
     '当前屏幕有什么'
+  ].includes(normalized)) return 'standard';
+
+  return null;
+}
+
+export function validateScreenReadingProviderResponse(response, summary) {
+  const protocol = validateAssistResponse(response);
+  if (!protocol.valid) return protocol;
+  if (response.requiresConfirmation || response.actions.length > 0) {
+    return invalid('screen reading response must not contain actions or confirmation');
+  }
+  if (containsTechnicalIdentifier(response.spoken)) {
+    return invalid('screen reading response contains technical identifiers');
+  }
+
+  const allowedLatin = collectAllowedLatinTokens(summary);
+  const unknownLatin = latinTokens(response.spoken)
+    .filter((token) => !allowedLatin.has(normalizeLatinToken(token)));
+  if (new Set(unknownLatin.map(normalizeLatinToken)).size > 2) {
+    return invalid('screen reading response contains excessive unknown english');
+  }
+  return { valid: true };
+}
+
+function isActionItemsReadingCommand(normalized) {
+  return [
+    '可操作项',
+    '有哪些可操作项',
+    '当前页面有哪些可操作项',
+    '当前页面有什么可操作项',
+    '这里有哪些可操作项',
+    '当前屏幕有哪些可操作项',
+    '当前页面能点什么',
+    '这里能点什么',
+    '当前页面可以点什么',
+    '有哪些按钮',
+    '只说明可操作项',
+    '只说可操作项',
+    '只读可操作项'
+  ].includes(normalized);
+}
+
+function isDetailedReadingCommand(normalized) {
+  return [
+    '详细读屏',
+    '详细读一下当前页面',
+    '详细朗读当前页面',
+    '详细说明当前页面',
+    '读详细一点',
+    '详细看一下当前屏幕'
+  ].includes(normalized);
+}
+
+function isBriefReadingCommand(normalized) {
+  return [
+    '简短读屏',
+    '简单读屏',
+    '快速读屏',
+    '简短读一下当前页面',
+    '简单读一下当前页面',
+    '简单说一下当前页面'
   ].includes(normalized);
 }
 
@@ -278,6 +336,37 @@ function normalize(value) {
 
 function stripWrappingPunctuation(value) {
   return value.trim().replace(/^[“"'「『【（(]+|[”"'」』】）)]+$/gu, '').trim();
+}
+
+function containsTechnicalIdentifier(value) {
+  return /(?:^(?:android|com|org|net)\.[a-z0-9_.]+|\bnode_\d+\b|[a-z][\w.]*:[a-z]+\/[\w.]+)/iu.test(value) ||
+    /\b(?:Button|EditText|FrameLayout|ImageView|LinearLayout|RecyclerView|ScrollView|TextView|ViewGroup)\b/u.test(value);
+}
+
+function collectAllowedLatinTokens(summary) {
+  const sourceLabels = [
+    ...(summary?.mainContent || []),
+    ...(summary?.actionableItems || []).map((item) => item?.label),
+    'AI',
+    'Wi-Fi',
+    'WLAN',
+    'Bluetooth'
+  ];
+  return new Set(
+    sourceLabels
+      .flatMap(latinTokens)
+      .map(normalizeLatinToken)
+      .filter(Boolean)
+  );
+}
+
+function latinTokens(value) {
+  if (typeof value !== 'string') return [];
+  return value.match(/[A-Za-z]+(?:-[A-Za-z]+)*/gu) || [];
+}
+
+function normalizeLatinToken(value) {
+  return value.toLowerCase().replace(/-/gu, '');
 }
 
 function invalid(reason) {

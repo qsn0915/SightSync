@@ -110,9 +110,12 @@ class AiProxyClientTest {
     }
 
     @Test
-    fun checkHealthCallsHealthEndpointWithAppToken() = runTest {
+    fun checkHealthCallsProviderProbeEndpointWithAppToken() = runTest {
         val interceptor = QueueInterceptor(
-            QueuedResult.Http(200, """{"status":"ok","provider":"configured","asrProvider":"configured"}"""),
+            QueuedResult.Http(
+                200,
+                """{"status":"ok","provider":"configured","asrProvider":"configured","providerProbe":"ok","model":"qwen3.7-plus","asrModel":"qwen3-asr-flash"}""",
+            ),
         )
         val client = client(interceptor)
 
@@ -120,6 +123,7 @@ class AiProxyClientTest {
 
         assertEquals(1, interceptor.requests.size)
         assertEquals("/v1/health", interceptor.requests.single().encodedPath)
+        assertEquals("probe=provider", interceptor.requests.single().encodedQuery)
         assertEquals("GET", interceptor.methods.single())
         assertEquals("Bearer test-token", interceptor.authorizationHeaders.single())
     }

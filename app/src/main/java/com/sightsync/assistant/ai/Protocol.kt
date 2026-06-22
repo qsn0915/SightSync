@@ -1,4 +1,4 @@
-﻿package com.sightsync.assistant.ai
+package com.sightsync.assistant.ai
 
 import com.sightsync.assistant.core.ScreenContext
 import kotlinx.serialization.Serializable
@@ -35,6 +35,9 @@ data class AiProxyHealthResponse(
     val status: String,
     val provider: String? = null,
     val asrProvider: String? = null,
+    val providerProbe: String? = null,
+    val model: String? = null,
+    val asrModel: String? = null,
 )
 
 @Serializable

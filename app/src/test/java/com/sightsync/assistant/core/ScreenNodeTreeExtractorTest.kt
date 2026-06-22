@@ -90,6 +90,139 @@ class ScreenNodeTreeExtractorTest {
     }
 
     @Test
+    fun extractsHierarchyRegionActionableTypeScrollContainerAndInputContext() {
+        val root = ScreenNodeSnapshot(
+            className = "android.widget.FrameLayout",
+            bounds = NodeBounds(0, 0, 1080, 2400),
+            children = listOf(
+                ScreenNodeSnapshot(
+                    text = "网络设置",
+                    className = "android.widget.TextView",
+                    bounds = NodeBounds(0, 0, 1080, 120),
+                ),
+                ScreenNodeSnapshot(
+                    className = "android.widget.ScrollView",
+                    bounds = NodeBounds(0, 120, 1080, 2200),
+                    scrollable = true,
+                    children = listOf(
+                        ScreenNodeSnapshot(
+                            text = "WLAN",
+                            className = "android.widget.Button",
+                            bounds = NodeBounds(0, 150, 1080, 260),
+                            clickable = true,
+                        ),
+                        ScreenNodeSnapshot(
+                            text = "网络名称",
+                            className = "android.widget.TextView",
+                            bounds = NodeBounds(0, 300, 1080, 360),
+                        ),
+                        ScreenNodeSnapshot(
+                            contentDescription = "请输入网络名称",
+                            className = "android.widget.EditText",
+                            bounds = NodeBounds(0, 380, 1080, 480),
+                            editable = true,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val nodes = ScreenNodeTreeExtractor().extract(root)
+
+        val title = nodes.single { it.text == "网络设置" }
+        val scrollContainer = nodes.single { it.role == "ScrollView" }
+        val wlan = nodes.single { it.text == "WLAN" }
+        val input = nodes.single { it.editable }
+
+        assertEquals(null, title.parentNodeId)
+        assertEquals(1, title.depth)
+        assertEquals("top", title.region)
+        assertEquals(null, title.actionableType)
+
+        assertEquals("scroll", scrollContainer.actionableType)
+        assertEquals(null, scrollContainer.scrollContainerNodeId)
+
+        assertEquals(scrollContainer.nodeId, wlan.parentNodeId)
+        assertEquals(2, wlan.depth)
+        assertEquals("click", wlan.actionableType)
+        assertEquals(scrollContainer.nodeId, wlan.scrollContainerNodeId)
+
+        assertEquals("input", input.actionableType)
+        assertEquals("网络名称", input.inputContext)
+        assertEquals(scrollContainer.nodeId, input.scrollContainerNodeId)
+    }
+
+    @Test
+    fun marksNodesPrivacySensitiveWhenLocalRedactionHidesContent() {
+        val root = ScreenNodeSnapshot(
+            children = listOf(
+                ScreenNodeSnapshot(
+                    text = "验证码 123456",
+                    className = "android.widget.TextView",
+                ),
+                ScreenNodeSnapshot(
+                    text = "secret",
+                    className = "android.widget.EditText",
+                    password = true,
+                    editable = true,
+                ),
+            ),
+        )
+
+        val nodes = ScreenNodeTreeExtractor().extract(root)
+
+        assertEquals("[验证码已隐藏]", nodes[0].text)
+        assertTrue(nodes[0].privacySensitive)
+        assertEquals("[已隐藏]", nodes[1].text)
+        assertTrue(nodes[1].privacySensitive)
+    }
+
+    @Test
+    fun screenshotPolicyBlocksSensitiveNodesBeforeSparseFallback() {
+        val sparseSensitiveNodes = listOf(
+            ScreenNode(
+                nodeId = "node_0",
+                text = "[已隐藏]",
+                contentDescription = null,
+                role = "EditText",
+                bounds = NodeBounds(0, 0, 100, 100),
+                clickable = false,
+                editable = true,
+                scrollable = false,
+                privacySensitive = true,
+            ),
+        )
+        val emptyDecision = ScreenContextPolicy.decideScreenshot(emptyList())
+        val sparseDecision = ScreenContextPolicy.decideScreenshot(
+            listOf(
+                ScreenNode(
+                    nodeId = "node_0",
+                    text = null,
+                    contentDescription = null,
+                    role = "WebView",
+                    bounds = NodeBounds(0, 0, 100, 100),
+                    clickable = false,
+                    editable = false,
+                    scrollable = true,
+                ),
+            ),
+        )
+        val sensitiveDecision = ScreenContextPolicy.decideScreenshot(sparseSensitiveNodes)
+
+        assertTrue(emptyDecision.attachScreenshot)
+        assertEquals("empty_node_tree", emptyDecision.reason)
+        assertFalse(emptyDecision.privacyBlocked)
+
+        assertTrue(sparseDecision.attachScreenshot)
+        assertEquals("sparse_node_tree", sparseDecision.reason)
+        assertFalse(sparseDecision.privacyBlocked)
+
+        assertFalse(sensitiveDecision.attachScreenshot)
+        assertEquals("privacy_sensitive_content", sensitiveDecision.reason)
+        assertTrue(sensitiveDecision.privacyBlocked)
+    }
+
+    @Test
     fun attachesScreenshotOnlyWhenNodeTreeIsInsufficient() {
         val richNodes = listOf(
             ScreenNode(

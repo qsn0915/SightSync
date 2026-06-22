@@ -28,7 +28,7 @@ class AiProxyClient(
     private val normalizedBaseUrl = baseUrl.trimEnd('/')
     private val assistEndpoint = "$normalizedBaseUrl/v1/assist"
     private val transcribeEndpoint = "$normalizedBaseUrl/v1/transcribe"
-    private val healthEndpoint = "$normalizedBaseUrl/v1/health"
+    private val healthEndpoint = "$normalizedBaseUrl/v1/health?probe=provider"
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true

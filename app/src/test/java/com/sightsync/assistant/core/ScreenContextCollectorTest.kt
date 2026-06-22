@@ -34,6 +34,8 @@ class ScreenContextCollectorTest {
         assertEquals("Settings", context.activityName)
         assertEquals(listOf("设置", "WLAN", "蓝牙"), context.nodes.map { it.text })
         assertNull(context.screenshotBase64)
+        assertEquals(false, context.screenshotPolicy?.attachScreenshot)
+        assertEquals("node_tree_sufficient", context.screenshotPolicy?.reason)
         assertEquals(0, screenshotCalls)
     }
 
@@ -63,7 +65,43 @@ class ScreenContextCollectorTest {
         )
 
         assertEquals("encoded-screenshot", context.screenshotBase64)
+        assertEquals(true, context.screenshotPolicy?.attachScreenshot)
+        assertEquals("sparse_node_tree", context.screenshotPolicy?.reason)
         assertEquals(1, screenshotCalls)
+    }
+
+    @Test
+    fun collectorIncludesScreenshotPolicyAndBlocksScreenshotForSensitiveContent() = runTest {
+        var screenshotCalls = 0
+        val assembler = ScreenContextAssembler(
+            nodeTreeExtractor = ScreenNodeTreeExtractor(),
+            screenshotProvider = ScreenshotProvider {
+                screenshotCalls += 1
+                "must-not-be-used"
+            },
+        )
+        val root = ScreenNodeSnapshot(
+            children = listOf(
+                ScreenNodeSnapshot(
+                    text = "secret",
+                    className = "android.widget.EditText",
+                    editable = true,
+                    password = true,
+                ),
+            ),
+        )
+
+        val context = assembler.collectFrom(
+            packageName = "com.example.secure",
+            activityName = "Password",
+            root = root,
+        )
+
+        assertNull(context.screenshotBase64)
+        assertEquals(0, screenshotCalls)
+        assertEquals(false, context.screenshotPolicy?.attachScreenshot)
+        assertEquals("privacy_sensitive_content", context.screenshotPolicy?.reason)
+        assertEquals(true, context.screenshotPolicy?.privacyBlocked)
     }
 
     @Test
@@ -89,4 +127,5 @@ class ScreenContextCollectorTest {
         assertNull(context.screenshotBase64)
         assertEquals(1, screenshotCalls)
     }
+
 }

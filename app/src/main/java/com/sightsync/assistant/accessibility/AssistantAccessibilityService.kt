@@ -22,6 +22,7 @@ import com.sightsync.assistant.apps.OpenAppCommandResolver
 import com.sightsync.assistant.apps.PackageManagerAppCatalogProvider
 import com.sightsync.assistant.core.ActionExecutor
 import com.sightsync.assistant.core.ScreenContextCollector
+import com.sightsync.assistant.diagnostics.AndroidDiagnosticLogger
 import com.sightsync.assistant.speech.ProxySpeechInputController
 import com.sightsync.assistant.speech.ShortAudioRecorder
 import com.sightsync.assistant.speech.TtsOutputController
@@ -33,6 +34,7 @@ import kotlinx.coroutines.cancel
 class AssistantAccessibilityService : AccessibilityService() {
     companion object {
         const val ACTION_STOP_LISTENING = "com.sightsync.assistant.action.STOP_LISTENING"
+        private const val TAG = "SightSyncSession"
         private const val SPEECH_OUTPUT_UNAVAILABLE_MESSAGE = "语音输出不可用，请检查系统 TTS 设置。"
         private const val LISTENING_CHANNEL_ID = "sightsync_continuous_listening"
         private const val LISTENING_NOTIFICATION_ID = 1001
@@ -55,6 +57,14 @@ class AssistantAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         activeService = this
+        if (::sessionManager.isInitialized) {
+            AndroidDiagnosticLogger.log(TAG, "Reusing initialized accessibility service controllers")
+            if (::overlayController.isInitialized) {
+                overlayController.show()
+                overlayController.setListening(sessionManager.isContinuousListening)
+            }
+            return
+        }
         ttsOutputController = TtsOutputController(this) {
             showSpeechOutputUnavailableFallback()
         }
@@ -103,7 +113,7 @@ class AssistantAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         if (activeService === this) activeService = null
-        if (::sessionManager.isInitialized) sessionManager.stopContinuousListening()
+        if (::sessionManager.isInitialized) sessionManager.dispose()
         stopListeningForeground()
         if (::overlayController.isInitialized) overlayController.hide()
         if (::speechInputController.isInitialized) speechInputController.cancel()
