@@ -135,4 +135,71 @@ class AiProtocolValidatorTest {
         assertFalse(result.isValid)
         assertEquals("spoken 不能为空", result.reason)
     }
+
+    @Test
+    fun rejectsActionsAlongsidePlan() {
+        val response = AssistResponse(
+            spoken = "我会分步完成。",
+            actions = listOf(AssistantAction(type = "GLOBAL_BACK")),
+            plan = testPlan(),
+        )
+
+        val result = AiProtocolValidator.validate(response)
+
+        assertFalse(result.isValid)
+        assertEquals("actions 与 plan 不能同时存在", result.reason)
+    }
+
+    @Test
+    fun rejectsTopLevelConfirmationForPlan() {
+        val response = AssistResponse(
+            spoken = "我会分步完成。",
+            requiresConfirmation = true,
+            plan = testPlan(),
+        )
+
+        val result = AiProtocolValidator.validate(response)
+
+        assertFalse(result.isValid)
+        assertEquals("plan 的二次确认必须声明在 ACTION 步骤上", result.reason)
+    }
+
+    @Test
+    fun rejectsLegacyResponseWithMultipleActions() {
+        val response = AssistResponse(
+            spoken = "我会连续操作。",
+            actions = listOf(
+                AssistantAction(type = "GLOBAL_BACK"),
+                AssistantAction(type = "GLOBAL_HOME"),
+            ),
+        )
+
+        val result = AiProtocolValidator.validate(response)
+
+        assertFalse(result.isValid)
+        assertEquals("单步响应最多包含一个动作；多步任务必须使用 plan", result.reason)
+    }
+
+    private fun testPlan() = AgentPlan(
+        goal = "返回并等待页面稳定",
+        maxDurationMillis = 2_000,
+        maxConsecutiveFailures = 1,
+        steps = listOf(
+            AgentPlanStep(
+                id = "back",
+                kind = "ACTION",
+                action = AssistantAction(type = "GLOBAL_BACK"),
+                precondition = PageExpectation(packageName = "com.example.app"),
+                timeoutMillis = 1_000,
+                requiresConfirmation = false,
+            ),
+            AgentPlanStep(
+                id = "validate",
+                kind = "VALIDATE_PAGE",
+                precondition = PageExpectation(packageName = "com.example.app"),
+                timeoutMillis = 1_000,
+                requiresConfirmation = false,
+            ),
+        ),
+    )
 }

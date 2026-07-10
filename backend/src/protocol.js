@@ -11,6 +11,19 @@ const ALLOWED_ACTIONS = new Set([
   'OPEN_APP'
 ]);
 
+const ALLOWED_PLAN_STEP_KINDS = new Set([
+  'ACTION',
+  'WAIT_FOR_UI',
+  'VALIDATE_PAGE'
+]);
+
+const MIN_PLAN_STEPS = 2;
+const MAX_PLAN_STEPS = 8;
+const MIN_PLAN_DURATION_MILLIS = 1000;
+const MAX_PLAN_DURATION_MILLIS = 60000;
+const MIN_PLAN_STEP_TIMEOUT_MILLIS = 250;
+const MAX_PLAN_STEP_TIMEOUT_MILLIS = 15000;
+const MAX_PLAN_CONSECUTIVE_FAILURES = 2;
 
 const ALLOWED_AUDIO_MIME_TYPES = new Set([
   'audio/mp4',
@@ -55,19 +68,24 @@ export function validateAssistResponse(response) {
   }
   if (!Array.isArray(response.actions)) return invalid('actions must be an array');
 
+  if (response.plan != null && response.actions.length > 0) {
+    return invalid('actions and plan are mutually exclusive');
+  }
+  if (response.plan != null && response.requiresConfirmation) {
+    return invalid('plan confirmation must be declared per ACTION step');
+  }
+  if (response.plan == null && response.actions.length > 1) {
+    return invalid('single-step response allows at most one action; use plan for multiple steps');
+  }
+
   for (const action of response.actions) {
-    if (!action || typeof action !== 'object') return invalid('action must be an object');
-    if (!ALLOWED_ACTIONS.has(action.type)) return invalid(`unsupported action type: ${action.type}`);
-    if (action.type === 'CLICK_NODE' && !isNonEmptyString(action.nodeId)) {
-      return invalid('CLICK_NODE requires nodeId');
-    }
-    if (action.type === 'SET_TEXT') {
-      if (!isNonEmptyString(action.nodeId)) return invalid('SET_TEXT requires nodeId');
-      if (typeof action.text !== 'string') return invalid('SET_TEXT requires text');
-    }
-    if (action.type === 'OPEN_APP' && !isNonEmptyString(action.appPackage)) {
-      return invalid('OPEN_APP requires appPackage');
-    }
+    const actionValidation = validateAction(action);
+    if (!actionValidation.valid) return actionValidation;
+  }
+
+  if (response.plan != null) {
+    const planValidation = validateAgentPlan(response.plan);
+    if (!planValidation.valid) return planValidation;
   }
 
   return { valid: true };
@@ -139,8 +157,8 @@ export function detectScreenReadingMode(utterance) {
 export function validateScreenReadingProviderResponse(response, summary) {
   const protocol = validateAssistResponse(response);
   if (!protocol.valid) return protocol;
-  if (response.requiresConfirmation || response.actions.length > 0) {
-    return invalid('screen reading response must not contain actions or confirmation');
+  if (response.requiresConfirmation || response.actions.length > 0 || response.plan != null) {
+    return invalid('screen reading response must not contain actions, plan, or confirmation');
   }
   if (containsTechnicalIdentifier(response.spoken)) {
     return invalid('screen reading response contains technical identifiers');
@@ -201,11 +219,143 @@ export function sanitizeAssistResponse(response) {
     throw new Error(result.reason);
   }
 
-  return {
+  const sanitized = {
     spoken: response.spoken,
     requiresConfirmation: response.requiresConfirmation,
-    actions: response.actions
+    actions: response.actions.map(sanitizeAction)
   };
+  if (response.plan != null) {
+    sanitized.plan = sanitizeAgentPlan(response.plan);
+  }
+  return sanitized;
+}
+
+function validateAction(action) {
+  if (!action || typeof action !== 'object') return invalid('action must be an object');
+  if (!ALLOWED_ACTIONS.has(action.type)) return invalid(`unsupported action type: ${action.type}`);
+  if (action.type === 'CLICK_NODE' && !isNonEmptyString(action.nodeId)) {
+    return invalid('CLICK_NODE requires nodeId');
+  }
+  if (action.type === 'SET_TEXT') {
+    if (!isNonEmptyString(action.nodeId)) return invalid('SET_TEXT requires nodeId');
+    if (typeof action.text !== 'string') return invalid('SET_TEXT requires text');
+  }
+  if (action.type === 'OPEN_APP' && !isNonEmptyString(action.appPackage)) {
+    return invalid('OPEN_APP requires appPackage');
+  }
+  return { valid: true };
+}
+
+function validateAgentPlan(plan) {
+  if (!plan || typeof plan !== 'object') return invalid('plan must be an object');
+  if (!isNonEmptyString(plan.goal)) return invalid('plan goal is required');
+  if (!Array.isArray(plan.steps) ||
+      plan.steps.length < MIN_PLAN_STEPS ||
+      plan.steps.length > MAX_PLAN_STEPS) {
+    return invalid('plan supports 2 to 8 steps');
+  }
+  if (!Number.isInteger(plan.maxDurationMillis) ||
+      plan.maxDurationMillis < MIN_PLAN_DURATION_MILLIS ||
+      plan.maxDurationMillis > MAX_PLAN_DURATION_MILLIS) {
+    return invalid('plan maxDurationMillis must be between 1000 and 60000');
+  }
+  if (!Number.isInteger(plan.maxConsecutiveFailures) ||
+      plan.maxConsecutiveFailures < 1 ||
+      plan.maxConsecutiveFailures > MAX_PLAN_CONSECUTIVE_FAILURES) {
+    return invalid('plan maxConsecutiveFailures must be between 1 and 2');
+  }
+
+  const stepIds = new Set();
+  let totalStepTimeoutMillis = 0;
+  for (const step of plan.steps) {
+    if (!step || typeof step !== 'object') return invalid('plan step must be an object');
+    if (!isNonEmptyString(step.id)) return invalid('plan step id is required');
+    if (stepIds.has(step.id)) return invalid('plan step ids must be unique');
+    stepIds.add(step.id);
+
+    if (!ALLOWED_PLAN_STEP_KINDS.has(step.kind)) {
+      return invalid(`unsupported plan step kind: ${step.kind}`);
+    }
+    if (!Number.isInteger(step.timeoutMillis) ||
+        step.timeoutMillis < MIN_PLAN_STEP_TIMEOUT_MILLIS ||
+        step.timeoutMillis > MAX_PLAN_STEP_TIMEOUT_MILLIS) {
+      return invalid(`plan step ${step.id} timeoutMillis must be between 250 and 15000`);
+    }
+    if (typeof step.requiresConfirmation !== 'boolean') {
+      return invalid(`plan step ${step.id} requiresConfirmation must be boolean`);
+    }
+    const expectationValidation = validatePageExpectation(step.precondition, step.id);
+    if (!expectationValidation.valid) return expectationValidation;
+
+    if (step.kind === 'ACTION') {
+      if (step.action == null) return invalid(`ACTION step ${step.id} requires action`);
+      const actionValidation = validateAction(step.action);
+      if (!actionValidation.valid) return actionValidation;
+    } else {
+      if (step.action != null) return invalid(`${step.kind} step ${step.id} must not contain action`);
+      if (step.requiresConfirmation) {
+        return invalid(`${step.kind} step ${step.id} must not require confirmation`);
+      }
+    }
+
+    totalStepTimeoutMillis += step.timeoutMillis;
+  }
+
+  if (totalStepTimeoutMillis > plan.maxDurationMillis) {
+    return invalid('plan step timeouts must not exceed maxDurationMillis');
+  }
+  return { valid: true };
+}
+
+function validatePageExpectation(expectation, stepId) {
+  if (!expectation || typeof expectation !== 'object') {
+    return invalid(`plan step ${stepId} requires a page precondition`);
+  }
+  if (expectation.requiredNodeIds != null && !Array.isArray(expectation.requiredNodeIds)) {
+    return invalid(`plan step ${stepId} requiredNodeIds must be an array`);
+  }
+  if (expectation.requiredTexts != null && !Array.isArray(expectation.requiredTexts)) {
+    return invalid(`plan step ${stepId} requiredTexts must be an array`);
+  }
+  const hasCondition = isNonEmptyString(expectation.packageName) ||
+    isNonEmptyString(expectation.activityName) ||
+    expectation.requiredNodeIds?.some(isNonEmptyString) === true ||
+    expectation.requiredTexts?.some(isNonEmptyString) === true;
+  return hasCondition
+    ? { valid: true }
+    : invalid(`plan step ${stepId} requires a page precondition`);
+}
+
+function sanitizeAgentPlan(plan) {
+  return {
+    goal: plan.goal,
+    maxDurationMillis: plan.maxDurationMillis,
+    maxConsecutiveFailures: plan.maxConsecutiveFailures,
+    steps: plan.steps.map((step) => ({
+      id: step.id,
+      kind: step.kind,
+      ...(step.action == null ? {} : { action: sanitizeAction(step.action) }),
+      precondition: sanitizePageExpectation(step.precondition),
+      timeoutMillis: step.timeoutMillis,
+      requiresConfirmation: step.requiresConfirmation
+    }))
+  };
+}
+
+function sanitizeAction(action) {
+  return Object.fromEntries(
+    ['type', 'nodeId', 'text', 'appPackage']
+      .filter((key) => action[key] !== undefined)
+      .map((key) => [key, action[key]])
+  );
+}
+
+function sanitizePageExpectation(expectation) {
+  return Object.fromEntries(
+    ['packageName', 'activityName', 'requiredNodeIds', 'requiredTexts']
+      .filter((key) => expectation[key] !== undefined)
+      .map((key) => [key, Array.isArray(expectation[key]) ? [...expectation[key]] : expectation[key]])
+  );
 }
 
 function isNonEmptyString(value) {

@@ -23,7 +23,7 @@ node_modules/
 *.log
 *.tmp
 *.bak
-generated-docs/logs/*.txt
+generated-docs/logs/
 
 # Android generated packages
 *.apk

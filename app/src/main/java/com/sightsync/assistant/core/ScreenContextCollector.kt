@@ -1,4 +1,4 @@
-package com.sightsync.assistant.core
+﻿package com.sightsync.assistant.core
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
@@ -13,6 +13,7 @@ import kotlin.coroutines.resume
 
 interface ScreenContextProvider {
     suspend fun collect(): ScreenContext
+    suspend fun collectForValidation(): ScreenContext
 }
 
 fun interface ScreenshotProvider {
@@ -24,7 +25,11 @@ class ScreenContextCollector(
     private val nodeTreeExtractor: ScreenNodeTreeExtractor = ScreenNodeTreeExtractor(),
     private val screenshotProvider: ScreenshotProvider = AccessibilityScreenshotProvider(service),
 ) : ScreenContextProvider {
-    override suspend fun collect(): ScreenContext {
+    override suspend fun collect(): ScreenContext = collect(allowScreenshot = true)
+
+    override suspend fun collectForValidation(): ScreenContext = collect(allowScreenshot = false)
+
+    private suspend fun collect(allowScreenshot: Boolean): ScreenContext {
         val activeWindow = service.findActiveWindow()
         val root = service.rootInActiveWindow ?: activeWindow?.root
         return ScreenContextAssembler(
@@ -34,6 +39,7 @@ class ScreenContextCollector(
             packageName = root?.packageName?.toString().orEmpty(),
             activityName = activeWindow?.title?.toString(),
             root = root?.let(::AccessibilityNodeSource),
+            allowScreenshot = allowScreenshot,
         )
     }
 
@@ -58,10 +64,11 @@ internal class ScreenContextAssembler(
         packageName: String,
         activityName: String?,
         root: ScreenNodeSource?,
+        allowScreenshot: Boolean = true,
     ): ScreenContext {
         val nodes = root?.let { nodeTreeExtractor.extract(it) }.orEmpty()
         val screenshotPolicy = ScreenContextPolicy.decideScreenshot(nodes)
-        val screenshot = if (screenshotPolicy.attachScreenshot) {
+        val screenshot = if (allowScreenshot && screenshotPolicy.attachScreenshot) {
             screenshotProvider.takeScreenshotBase64()
         } else {
             null

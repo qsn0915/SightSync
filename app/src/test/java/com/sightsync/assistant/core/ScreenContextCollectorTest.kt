@@ -128,4 +128,34 @@ class ScreenContextCollectorTest {
         assertEquals(1, screenshotCalls)
     }
 
+    @Test
+    fun validationCollectionNeverRequestsScreenshotForSparsePage() = runTest {
+        var screenshotCalls = 0
+        val assembler = ScreenContextAssembler(
+            nodeTreeExtractor = ScreenNodeTreeExtractor(),
+            screenshotProvider = ScreenshotProvider {
+                screenshotCalls += 1
+                "must-not-be-used"
+            },
+        )
+        val root = ScreenNodeSnapshot(
+            children = listOf(
+                ScreenNodeSnapshot(
+                    className = "android.webkit.WebView",
+                    scrollable = true,
+                ),
+            ),
+        )
+
+        val context = assembler.collectFrom(
+            packageName = "com.android.browser",
+            activityName = "Browser",
+            root = root,
+            allowScreenshot = false,
+        )
+
+        assertNull(context.screenshotBase64)
+        assertEquals(0, screenshotCalls)
+        assertEquals(1, context.nodes.size)
+    }
 }

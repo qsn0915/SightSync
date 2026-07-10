@@ -6,7 +6,8 @@ import {
   validateTranscribeRequest,
   createFallbackAssistResponse,
   detectScreenReadingMode,
-  validateScreenReadingProviderResponse
+  validateScreenReadingProviderResponse,
+  sanitizeAssistResponse
 } from '../src/protocol.js';
 
 test('validateAssistRequest accepts minimal valid request', () => {
@@ -56,6 +57,86 @@ test('validateAssistResponse requires nodeId for CLICK_NODE', () => {
 
   assert.equal(result.valid, false);
   assert.equal(result.reason, 'CLICK_NODE requires nodeId');
+});
+
+test('validateAssistResponse accepts a bounded multi-step plan and rejects mixed actions', () => {
+  const response = boundedPlanResponse();
+
+  assert.equal(validateAssistResponse(response).valid, true);
+  assert.equal(validateAssistResponse({
+    ...response,
+    actions: [{ type: 'GLOBAL_BACK' }]
+  }).reason, 'actions and plan are mutually exclusive');
+  assert.equal(validateAssistResponse({
+    ...response,
+    requiresConfirmation: true
+  }).reason, 'plan confirmation must be declared per ACTION step');
+});
+
+test('validateAssistResponse requires legacy multi-action responses to use plan', () => {
+  const result = validateAssistResponse({
+    spoken: '我会连续操作。',
+    requiresConfirmation: false,
+    actions: [{ type: 'GLOBAL_BACK' }, { type: 'GLOBAL_HOME' }]
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.reason, 'single-step response allows at most one action; use plan for multiple steps');
+});
+
+test('validateAssistResponse rejects unbounded or unsafe plan steps', () => {
+  const base = boundedPlanResponse();
+  const invalidCases = [
+    [{ ...base, plan: { ...base.plan, steps: [base.plan.steps[0]] } }, 'plan supports 2 to 8 steps'],
+    [{ ...base, plan: { ...base.plan, steps: Array.from({ length: 9 }, (_, index) => ({
+      ...base.plan.steps[0], id: `step_${index}`
+    })) } }, 'plan supports 2 to 8 steps'],
+    [{ ...base, plan: { ...base.plan, maxDurationMillis: 60001 } }, 'plan maxDurationMillis must be between 1000 and 60000'],
+    [{ ...base, plan: { ...base.plan, maxConsecutiveFailures: 3 } }, 'plan maxConsecutiveFailures must be between 1 and 2'],
+    [{ ...base, plan: { ...base.plan, maxDurationMillis: 9000 } }, 'plan step timeouts must not exceed maxDurationMillis'],
+    [{ ...base, plan: { ...base.plan, steps: base.plan.steps.map((step) => ({ ...step, id: 'duplicate' })) } }, 'plan step ids must be unique'],
+    [{ ...base, plan: { ...base.plan, steps: base.plan.steps.map((step, index) => index === 0
+      ? { ...step, action: { type: 'RUN_SCRIPT' } }
+      : step) } }, 'unsupported action type: RUN_SCRIPT'],
+    [{ ...base, plan: { ...base.plan, steps: base.plan.steps.map((step, index) => index === 0
+      ? { ...step, precondition: {} }
+      : step) } }, 'plan step open_browser requires a page precondition'],
+    [{ ...base, plan: { ...base.plan, steps: base.plan.steps.map((step, index) => index === 0
+      ? { ...step, timeoutMillis: 20000 }
+      : step) } }, 'plan step open_browser timeoutMillis must be between 250 and 15000'],
+    [{ ...base, plan: { ...base.plan, steps: base.plan.steps.map((step, index) => index === 1
+      ? { ...step, kind: 'RUN_SCRIPT' }
+      : step) } }, 'unsupported plan step kind: RUN_SCRIPT'],
+    [{ ...base, plan: { ...base.plan, steps: base.plan.steps.map((step, index) => index === 1
+      ? { ...step, action: { type: 'GLOBAL_BACK' } }
+      : step) } }, 'WAIT_FOR_UI step wait_browser must not contain action'],
+    [{ ...base, plan: { ...base.plan, steps: base.plan.steps.map((step, index) => index === 1
+      ? { ...step, requiresConfirmation: true }
+      : step) } }, 'WAIT_FOR_UI step wait_browser must not require confirmation']
+  ];
+
+  for (const [response, reason] of invalidCases) {
+    assert.equal(validateAssistResponse(response).reason, reason);
+  }
+});
+
+test('sanitizeAssistResponse removes unknown nested plan fields', () => {
+  const response = boundedPlanResponse();
+  response.plan.providerInternal = 'secret';
+  response.plan.steps[0].providerInternal = 'secret';
+  response.plan.steps[0].action.providerInternal = 'secret';
+  response.plan.steps[0].precondition.providerInternal = 'secret';
+
+  const sanitized = sanitizeAssistResponse(response);
+
+  assert.equal(sanitized.plan.providerInternal, undefined);
+  assert.equal(sanitized.plan.steps[0].providerInternal, undefined);
+  assert.equal(sanitized.plan.steps[0].action.providerInternal, undefined);
+  assert.equal(sanitized.plan.steps[0].precondition.providerInternal, undefined);
+  assert.deepEqual(sanitized.plan.steps[0].action, {
+    type: 'OPEN_APP',
+    appPackage: 'com.android.chrome'
+  });
 });
 
 test('createFallbackAssistResponse describes current page without actions', () => {
@@ -142,6 +223,15 @@ test('validateScreenReadingProviderResponse rejects actions and technical output
   }, summary).valid, false);
 });
 
+test('validateScreenReadingProviderResponse rejects multi-step plans', () => {
+  const result = validateScreenReadingProviderResponse(boundedPlanResponse(), {
+    mainContent: ['设置'],
+    actionableItems: []
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.reason, 'screen reading response must not contain actions, plan, or confirmation');
+});
 
 test('validateScreenReadingProviderResponse allows source names but rejects excessive unknown english', () => {
   const summary = {
@@ -265,3 +355,33 @@ test('validateTranscribeRequest rejects unsupported audio mime types', () => {
   assert.equal(result.valid, false);
   assert.equal(result.reason, 'unsupported audio mimeType: text/plain');
 });
+
+function boundedPlanResponse() {
+  return {
+    spoken: '我会分步完成。',
+    requiresConfirmation: false,
+    actions: [],
+    plan: {
+      goal: '打开浏览器并等待页面稳定',
+      maxDurationMillis: 10000,
+      maxConsecutiveFailures: 2,
+      steps: [
+        {
+          id: 'open_browser',
+          kind: 'ACTION',
+          action: { type: 'OPEN_APP', appPackage: 'com.android.chrome' },
+          precondition: { packageName: 'com.android.launcher' },
+          timeoutMillis: 5000,
+          requiresConfirmation: false
+        },
+        {
+          id: 'wait_browser',
+          kind: 'WAIT_FOR_UI',
+          precondition: { packageName: 'com.android.chrome' },
+          timeoutMillis: 5000,
+          requiresConfirmation: false
+        }
+      ]
+    }
+  };
+}

@@ -6,8 +6,10 @@ import com.sightsync.assistant.ai.AiProxyEndpoint
 import com.sightsync.assistant.ai.AiProxyErrorType
 import com.sightsync.assistant.ai.AiProxyException
 import com.sightsync.assistant.apps.AppCatalogProvider
+import com.sightsync.assistant.apps.BrowserSearchCommandResolver
 import com.sightsync.assistant.apps.InstalledApp
 import com.sightsync.assistant.apps.OpenAppCommandResolver
+import com.sightsync.assistant.apps.WeChatDraftCommandResolver
 import com.sightsync.assistant.core.ActionResult
 import com.sightsync.assistant.core.NodeBounds
 import com.sightsync.assistant.core.ScreenContext
@@ -598,6 +600,271 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun explicitBrowserSearchRunsLocalTaskWithoutCollectingAiScreenOrCallingAi() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = FakeActionRunner()
+        val taskCalls = mutableListOf<Pair<String, String>>()
+        val openResolver = openAppResolver(
+            InstalledApp(label = "Chrome", packageName = "com.android.chrome"),
+            defaultBrowserPackage = "com.android.chrome",
+        )
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("用浏览器搜索无障碍新闻")),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            openAppCommandResolver = openResolver,
+            browserSearchCommandResolver = BrowserSearchCommandResolver(openResolver),
+            browserSearchTaskExecutor = BrowserSearchTaskExecutor { browserPackage, query ->
+                taskCalls += browserPackage to query
+                BrowserSearchTaskResult.Completed
+            },
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertTrue(actions.executions.isEmpty())
+        assertEquals(listOf("com.android.chrome" to "无障碍新闻"), taskCalls)
+        assertTrue(tts.spoken.contains("我会用浏览器搜索无障碍新闻。"))
+        assertTrue(tts.spoken.contains("搜索已提交。"))
+    }
+
+    @Test
+    fun browserSearchFailureSpeaksReasonWithoutFallingBackToAi() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val openResolver = openAppResolver(
+            InstalledApp(label = "Chrome", packageName = "com.android.chrome"),
+            defaultBrowserPackage = "com.android.chrome",
+        )
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("打开浏览器搜索天气")),
+            screen = screen,
+            ai = ai,
+            openAppCommandResolver = openResolver,
+            browserSearchCommandResolver = BrowserSearchCommandResolver(openResolver),
+            browserSearchTaskExecutor = BrowserSearchTaskExecutor { _, _ ->
+                BrowserSearchTaskResult.Stopped("找不到唯一的搜索或地址栏，已停止搜索。")
+            },
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertTrue(tts.spoken.contains("找不到唯一的搜索或地址栏，已停止搜索。"))
+    }
+
+    @Test
+    fun uniqueInAppNavigationSpeaksBeforeExecutingWithoutCallingAi() = runTest {
+        val events = mutableListOf<String>()
+        val tts = EventSpeechOutput(events)
+        val screen = NavigationSessionScreenProvider(
+            screenContext(
+                nodes = listOf(
+                    ScreenNode(
+                        nodeId = "node_wlan",
+                        text = "WLAN",
+                        contentDescription = null,
+                        role = "View",
+                        bounds = NodeBounds(0, 0, 100, 100),
+                        clickable = true,
+                        editable = false,
+                        scrollable = false,
+                    ),
+                ),
+            ),
+        )
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = EventActionRunner(events)
+        val coordinator = InAppNavigationCoordinator(screen)
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("点击 WLAN")),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            inAppNavigationResolver = coordinator,
+            navigationPlanExecutor = AgentPlanExecutor(screen, actions),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+        assertEquals(listOf("CLICK_NODE"), actions.executed.map { it.type })
+        assertTrue(events.indexOf("speak:我会点击WLAN。") < events.indexOf("action:CLICK_NODE"))
+        assertTrue(events.contains("speak:已完成页面导航。"))
+    }
+
+    @Test
+    fun ambiguousInAppNavigationAsksThenUsesOneBareClarification() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = NavigationSessionScreenProvider(ambiguousNavigationScreen())
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val actions = FakeActionRunner()
+        val coordinator = InAppNavigationCoordinator(screen)
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("点击 WLAN"),
+                SpeechInputResult.Recognized("WLAN 设置"),
+            ),
+            screen = screen,
+            ai = ai,
+            actions = actions,
+            inAppNavigationResolver = coordinator,
+            navigationPlanExecutor = AgentPlanExecutor(screen, actions),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+        assertTrue(actions.executions.isEmpty())
+        assertTrue(tts.spoken.any { it.contains("多个候选") })
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals("node_settings", actions.executions.single().actions.single().nodeId)
+        assertTrue(ai.utterances.isEmpty())
+        assertFalse(coordinator.hasPendingClarification)
+    }
+
+    @Test
+    fun cancellationClearsPendingInAppNavigationWithoutCollectingAgain() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = NavigationSessionScreenProvider(screenContext(nodes = emptyList()))
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "不应调用。"))
+        val coordinator = InAppNavigationCoordinator(screen)
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("点击 WLAN"),
+                SpeechInputResult.Recognized("取消"),
+            ),
+            screen = screen,
+            ai = ai,
+            inAppNavigationResolver = coordinator,
+            navigationPlanExecutor = AgentPlanExecutor(screen, FakeActionRunner()),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+        assertTrue(coordinator.hasPendingClarification)
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertFalse(coordinator.hasPendingClarification)
+        assertEquals(1, screen.validationCount)
+        assertTrue(tts.spoken.contains("已取消。"))
+        assertTrue(ai.utterances.isEmpty())
+    }
+
+    @Test
+    fun highRiskInAppNavigationWaitsForExistingConfirmationFlow() = runTest {
+        val tts = FakeSpeechOutput()
+        val deleteScreen = screenContext(
+            nodes = listOf(
+                ScreenNode(
+                    nodeId = "node_delete",
+                    text = "删除账号",
+                    contentDescription = null,
+                    role = "Button",
+                    bounds = NodeBounds(0, 0, 100, 100),
+                    clickable = true,
+                    editable = false,
+                    scrollable = false,
+                ),
+            ),
+        )
+        val screen = NavigationSessionScreenProvider(deleteScreen)
+        val actions = FakeActionRunner()
+        val coordinator = InAppNavigationCoordinator(screen)
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("点击删除账号"),
+                SpeechInputResult.Recognized("确认执行"),
+            ),
+            screen = screen,
+            actions = actions,
+            inAppNavigationResolver = coordinator,
+            navigationPlanExecutor = AgentPlanExecutor(screen, actions),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+        assertTrue(actions.executions.isEmpty())
+        assertTrue(tts.spoken.any { it.contains("高风险操作") })
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals("node_delete", actions.executions.single().actions.single().nodeId)
+        assertTrue(actions.executions.single().confirmed)
+    }
+
+    @Test
+    fun inAppNavigationDoesNotTakeOrdinaryOpenAppCommand() = runTest {
+        val screen = NavigationSessionScreenProvider(screenContext())
+        val actions = FakeActionRunner()
+        val coordinator = InAppNavigationCoordinator(screen)
+        val manager = manager(
+            tts = FakeSpeechOutput(),
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("打开微信")),
+            screen = screen,
+            actions = actions,
+            openAppCommandResolver = openAppResolver(
+                InstalledApp(label = "微信", packageName = "com.tencent.mm"),
+            ),
+            inAppNavigationResolver = coordinator,
+            navigationPlanExecutor = AgentPlanExecutor(screen, actions),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals("OPEN_APP", actions.executions.single().actions.single().type)
+        assertEquals(0, screen.validationCount)
+    }
+
+    @Test
+    fun stopAndDisposeClearInAppNavigationState() = runTest {
+        val stopResolver = RecordingInAppNavigationResolver()
+        val stopManager = manager(
+            tts = FakeSpeechOutput(),
+            speech = FakeSpeechInput(),
+            inAppNavigationResolver = stopResolver,
+        )
+        stopManager.startContinuousListening()
+        runCurrent()
+        stopManager.stopContinuousListening()
+        advanceUntilIdle()
+
+        val disposeResolver = RecordingInAppNavigationResolver()
+        val disposeManager = manager(
+            tts = FakeSpeechOutput(),
+            speech = FakeSpeechInput(),
+            inAppNavigationResolver = disposeResolver,
+        )
+        disposeManager.dispose()
+
+        assertTrue(stopResolver.clearCount >= 1)
+        assertEquals(1, disposeResolver.clearCount)
+    }
+
+    @Test
     fun ambiguousLocalOpenAppCommandAsksWithoutExecutingOrCallingAi() = runTest {
         val tts = FakeSpeechOutput()
         val screen = FakeScreenContextProvider()
@@ -1172,13 +1439,106 @@ class AssistantSessionManagerPhase2Test {
         assertTrue(tts.spoken.contains("页面已变化，我已重新查看当前屏幕，请再说一次。"))
     }
 
+    @Test
+    fun explicitWeChatDraftRunsLocallyAndStopsBeforeSend() = runTest {
+        val events = mutableListOf<String>()
+        val tts = EventSpeechOutput(events)
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient()
+        var executedContact: String? = null
+        var executedMessage: String? = null
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(
+                SpeechInputResult.Recognized("在微信给张三写草稿：明天上午十点见"),
+            ),
+            screen = screen,
+            ai = ai,
+            weChatDraftCommandResolver = WeChatDraftCommandResolver(),
+            weChatDraftTaskExecutor = WeChatDraftTaskExecutor { contact, message ->
+                events += "execute:$contact:$message"
+                executedContact = contact
+                executedMessage = message
+                WeChatDraftTaskResult.DraftReady
+            },
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals("张三", executedContact)
+        assertEquals("明天上午十点见", executedMessage)
+        assertTrue(events.indexOfFirst { it.startsWith("speak:我会在微信") } < events.indexOfFirst { it.startsWith("execute:") })
+        assertTrue(events.any { it.contains("手动发送") })
+        assertTrue(events.none { it.contains("确认执行") })
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+    }
+
+    @Test
+    fun malformedWeChatDraftIsRejectedLocally() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient()
+        var executionCount = 0
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("在微信给张三写草稿")),
+            screen = screen,
+            ai = ai,
+            weChatDraftCommandResolver = WeChatDraftCommandResolver(),
+            weChatDraftTaskExecutor = WeChatDraftTaskExecutor { _, _ ->
+                executionCount += 1
+                WeChatDraftTaskResult.DraftReady
+            },
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(0, executionCount)
+        assertTrue(tts.spoken.any { it.contains("命令不完整") })
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+    }
+
+    @Test
+    fun stoppedWeChatDraftUsesLocalReasonWithoutCallingAi() = runTest {
+        val tts = FakeSpeechOutput()
+        val screen = FakeScreenContextProvider()
+        val ai = FakeAssistantClient()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("在微信给张三写草稿：你好")),
+            screen = screen,
+            ai = ai,
+            weChatDraftCommandResolver = WeChatDraftCommandResolver(),
+            weChatDraftTaskExecutor = WeChatDraftTaskExecutor { _, _ ->
+                WeChatDraftTaskResult.Stopped("找到多个同名微信联系人，已停止填写草稿。")
+            },
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(tts.spoken.contains("找到多个同名微信联系人，已停止填写草稿。"))
+        assertEquals(0, screen.collectCount)
+        assertTrue(ai.utterances.isEmpty())
+    }
+
     private fun TestScope.manager(
         tts: SpeechOutput,
         speech: SpeechInput,
-        screen: FakeScreenContextProvider = FakeScreenContextProvider(),
+        screen: ScreenContextProvider = FakeScreenContextProvider(),
         ai: FakeAssistantClient = FakeAssistantClient(response = AssistResponse(spoken = "好的。")),
-        actions: FakeActionRunner = FakeActionRunner(),
+        actions: ActionRunner = FakeActionRunner(),
         openAppCommandResolver: OpenAppCommandResolver? = null,
+        browserSearchCommandResolver: BrowserSearchCommandResolver? = null,
+        browserSearchTaskExecutor: BrowserSearchTaskExecutor? = null,
+        inAppNavigationResolver: InAppNavigationResolver? = null,
+        navigationPlanExecutor: AgentPlanExecutor? = null,
+        weChatDraftCommandResolver: WeChatDraftCommandResolver? = null,
+        weChatDraftTaskExecutor: WeChatDraftTaskExecutor? = null,
         diagnosticLogger: com.sightsync.assistant.diagnostics.DiagnosticLogger = com.sightsync.assistant.diagnostics.NoOpDiagnosticLogger,
     ): AssistantSessionManager {
         val dispatcher = StandardTestDispatcher(testScheduler)
@@ -1191,6 +1551,12 @@ class AssistantSessionManagerPhase2Test {
             assistantClient = ai,
             actionRunner = actions,
             openAppCommandResolver = openAppCommandResolver,
+            browserSearchCommandResolver = browserSearchCommandResolver,
+            browserSearchTaskExecutor = browserSearchTaskExecutor,
+            inAppNavigationResolver = inAppNavigationResolver,
+            navigationPlanExecutor = navigationPlanExecutor,
+            weChatDraftCommandResolver = weChatDraftCommandResolver,
+            weChatDraftTaskExecutor = weChatDraftTaskExecutor,
             diagnosticLogger = diagnosticLogger,
         )
     }
@@ -1292,6 +1658,18 @@ private class FakeSpeechOutput(
     }
 }
 
+private class EventSpeechOutput(
+    private val events: MutableList<String>,
+) : SpeechOutput {
+    override val isSpeaking: Boolean = false
+
+    override fun speak(text: String) {
+        events += "speak:$text"
+    }
+
+    override fun stop() = Unit
+}
+
 private class FakeScreenContextProvider(
     vararg contexts: ScreenContext,
 ) : ScreenContextProvider {
@@ -1303,6 +1681,7 @@ private class FakeScreenContextProvider(
         return pendingContexts.removeFirstOrNull() ?: screenContext()
     }
 
+    override suspend fun collectForValidation(): ScreenContext = collect()
 }
 
 private class FakeAssistantClient(
@@ -1340,6 +1719,52 @@ private class FakeActionRunner(
     }
 }
 
+private class EventActionRunner(
+    private val events: MutableList<String>,
+) : ActionRunner {
+    val executed = mutableListOf<AssistantAction>()
+
+    override fun execute(
+        actions: List<AssistantAction>,
+        confirmed: Boolean,
+        sourceScreen: ScreenContext,
+    ): List<ActionResult> = actions.map { action ->
+        events += "action:${action.type}"
+        executed += action
+        ActionResult(true, "已执行。")
+    }
+}
+
+private class NavigationSessionScreenProvider(
+    private var current: ScreenContext,
+) : ScreenContextProvider {
+    var collectCount = 0
+    var validationCount = 0
+
+    override suspend fun collect(): ScreenContext {
+        collectCount += 1
+        return current
+    }
+
+    override suspend fun collectForValidation(): ScreenContext {
+        validationCount += 1
+        return current
+    }
+}
+
+private class RecordingInAppNavigationResolver : InAppNavigationResolver {
+    var clearCount = 0
+
+    override val hasPendingClarification: Boolean = false
+
+    override suspend fun resolve(utterance: String): InAppNavigationResolution =
+        InAppNavigationResolution.NotCommand
+
+    override fun clear() {
+        clearCount += 1
+    }
+}
+
 private class FakeDiagnosticLogger : com.sightsync.assistant.diagnostics.DiagnosticLogger {
     val messages = mutableListOf<String>()
 
@@ -1374,6 +1799,32 @@ private fun screenContext(
         activityName = null,
         nodes = nodes,
         screenshotBase64 = null,
+    )
+
+private fun ambiguousNavigationScreen(): ScreenContext =
+    screenContext(
+        nodes = listOf(
+            ScreenNode(
+                nodeId = "node_settings",
+                text = "WLAN 设置",
+                contentDescription = null,
+                role = "View",
+                bounds = NodeBounds(0, 0, 100, 100),
+                clickable = true,
+                editable = false,
+                scrollable = false,
+            ),
+            ScreenNode(
+                nodeId = "node_help",
+                text = "WLAN 帮助",
+                contentDescription = null,
+                role = "View",
+                bounds = NodeBounds(0, 100, 100, 200),
+                clickable = true,
+                editable = false,
+                scrollable = false,
+            ),
+        ),
     )
 
 private fun openAppResolver(

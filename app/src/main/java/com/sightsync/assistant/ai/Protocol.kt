@@ -1,4 +1,4 @@
-package com.sightsync.assistant.ai
+﻿package com.sightsync.assistant.ai
 
 import com.sightsync.assistant.core.ScreenContext
 import kotlinx.serialization.Serializable
@@ -16,6 +16,7 @@ data class AssistResponse(
     val spoken: String,
     val requiresConfirmation: Boolean = false,
     val actions: List<AssistantAction> = emptyList(),
+    val plan: AgentPlan? = null,
 )
 
 @Serializable
@@ -70,28 +71,50 @@ object AiProtocolValidator {
             return ProtocolValidationResult(false, "spoken 不能为空")
         }
 
+        if (response.plan != null && response.actions.isNotEmpty()) {
+            return ProtocolValidationResult(false, "actions 与 plan 不能同时存在")
+        }
+        if (response.plan != null && response.requiresConfirmation) {
+            return ProtocolValidationResult(false, "plan 的二次确认必须声明在 ACTION 步骤上")
+        }
+        if (response.plan == null && response.actions.size > 1) {
+            return ProtocolValidationResult(false, "单步响应最多包含一个动作；多步任务必须使用 plan")
+        }
+
         response.actions.forEach { action ->
-            if (action.type !in allowedActions) {
-                return ProtocolValidationResult(false, "不支持的动作类型：${action.type}")
+            val actionValidation = validateAction(action)
+            if (!actionValidation.isValid) return actionValidation
+        }
+
+        response.plan?.let { plan ->
+            val planValidation = AgentPlanValidator.validate(plan)
+            if (!planValidation.isValid) return planValidation
+        }
+
+        return ProtocolValidationResult(true)
+    }
+
+    internal fun validateAction(action: AssistantAction): ProtocolValidationResult {
+        if (action.type !in allowedActions) {
+            return ProtocolValidationResult(false, "不支持的动作类型：${action.type}")
+        }
+
+        when (action.type) {
+            "CLICK_NODE" -> if (action.nodeId.isNullOrBlank()) {
+                return ProtocolValidationResult(false, "CLICK_NODE 缺少 nodeId")
             }
 
-            when (action.type) {
-                "CLICK_NODE" -> if (action.nodeId.isNullOrBlank()) {
-                    return ProtocolValidationResult(false, "CLICK_NODE 缺少 nodeId")
+            "SET_TEXT" -> {
+                if (action.nodeId.isNullOrBlank()) {
+                    return ProtocolValidationResult(false, "SET_TEXT 缺少 nodeId")
                 }
+                if (action.text == null) {
+                    return ProtocolValidationResult(false, "SET_TEXT 缺少 text")
+                }
+            }
 
-                "SET_TEXT" -> {
-                    if (action.nodeId.isNullOrBlank()) {
-                        return ProtocolValidationResult(false, "SET_TEXT 缺少 nodeId")
-                    }
-                    if (action.text == null) {
-                        return ProtocolValidationResult(false, "SET_TEXT 缺少 text")
-                    }
-                }
-
-                "OPEN_APP" -> if (action.appPackage.isNullOrBlank()) {
-                    return ProtocolValidationResult(false, "OPEN_APP 缺少 appPackage")
-                }
+            "OPEN_APP" -> if (action.appPackage.isNullOrBlank()) {
+                return ProtocolValidationResult(false, "OPEN_APP 缺少 appPackage")
             }
         }
 

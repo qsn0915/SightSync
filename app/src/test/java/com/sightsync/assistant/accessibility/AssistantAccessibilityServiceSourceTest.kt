@@ -58,6 +58,43 @@ class AssistantAccessibilityServiceSourceTest {
     }
 
     @Test
+    fun wiresBrowserSearchTaskWithSharedRuntimeDependencies() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+
+        assertTrue(source.contains("val appCatalogProvider = PackageManagerAppCatalogProvider(this)"))
+        assertTrue(source.contains("val openAppCommandResolver = OpenAppCommandResolver(appCatalogProvider)"))
+        assertTrue(source.contains("val screenContextProvider = ScreenContextCollector(this)"))
+        assertTrue(source.contains("val actionRunner = ActionExecutor(this)"))
+        assertTrue(source.contains("BrowserSearchCommandResolver(openAppCommandResolver)"))
+        assertTrue(source.contains("AgentPlanExecutor(screenContextProvider, actionRunner)"))
+        assertTrue(source.contains("BrowserSearchTaskRunner("))
+        assertTrue(source.contains("browserSearchTaskExecutor ="))
+    }
+
+    @Test
+    fun wiresInAppNavigationWithSharedPlanExecutor() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+
+        assertTrue(source.contains("val agentPlanExecutor = AgentPlanExecutor(screenContextProvider, actionRunner)"))
+        assertTrue(source.contains("planExecutor = agentPlanExecutor"))
+        assertTrue(source.contains("val inAppNavigationResolver = InAppNavigationCoordinator(screenContextProvider)"))
+        assertTrue(source.contains("inAppNavigationResolver = inAppNavigationResolver"))
+        assertTrue(source.contains("navigationPlanExecutor = agentPlanExecutor"))
+    }
+
+    @Test
+    fun wiresWeChatDraftFlowWithSharedRuntimeDependencies() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+
+        assertTrue(source.contains("WeChatDraftCommandResolver()"))
+        assertTrue(source.contains("val weChatDraftTaskExecutor = WeChatDraftTaskRunner("))
+        assertTrue(source.contains("screenContextProvider = screenContextProvider"))
+        assertTrue(source.contains("planExecutor = agentPlanExecutor"))
+        assertTrue(source.contains("weChatDraftCommandResolver ="))
+        assertTrue(source.contains("weChatDraftTaskExecutor = weChatDraftTaskExecutor"))
+    }
+
+    @Test
     fun usesSavedAiServiceConnectionConfigInsteadOfBuildConfigProxyDefaults() {
         val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
 

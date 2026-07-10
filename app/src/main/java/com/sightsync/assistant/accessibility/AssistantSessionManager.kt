@@ -4,8 +4,12 @@ import com.sightsync.assistant.ai.AiProtocolValidator
 import com.sightsync.assistant.ai.AiProxyErrorType
 import com.sightsync.assistant.ai.AiProxyException
 import com.sightsync.assistant.ai.AssistResponse
+import com.sightsync.assistant.apps.BrowserSearchCommandResolver
+import com.sightsync.assistant.apps.BrowserSearchCommandResult
 import com.sightsync.assistant.apps.OpenAppCommandResolver
 import com.sightsync.assistant.apps.OpenAppCommandResult
+import com.sightsync.assistant.apps.WeChatDraftCommandResolver
+import com.sightsync.assistant.apps.WeChatDraftCommandResult
 import com.sightsync.assistant.core.RiskClassifier
 import com.sightsync.assistant.core.ScreenContext
 import com.sightsync.assistant.core.ScreenContextProvider
@@ -32,6 +36,12 @@ class AssistantSessionManager(
     private val assistantClient: AssistantClient,
     private val actionRunner: ActionRunner,
     private val openAppCommandResolver: OpenAppCommandResolver? = null,
+    private val browserSearchCommandResolver: BrowserSearchCommandResolver? = null,
+    private val browserSearchTaskExecutor: BrowserSearchTaskExecutor? = null,
+    private val inAppNavigationResolver: InAppNavigationResolver? = null,
+    private val navigationPlanExecutor: AgentPlanExecutor? = null,
+    private val weChatDraftCommandResolver: WeChatDraftCommandResolver? = null,
+    private val weChatDraftTaskExecutor: WeChatDraftTaskExecutor? = null,
     private val onContinuousListeningChanged: (Boolean) -> Unit = {},
     private val diagnosticLogger: DiagnosticLogger = AndroidDiagnosticLogger,
 ) {
@@ -106,6 +116,7 @@ class AssistantSessionManager(
         onContinuousListeningChanged(false)
         confirmationManager.clear()
         pendingOpenAppCandidatePackages = emptySet()
+        inAppNavigationResolver?.clear()
         voiceTurnCoordinator.cancelVoice()
         announceStoppedAfterCleanup(running, announcementVersion)
     }
@@ -120,6 +131,7 @@ class AssistantSessionManager(
         continuousJob?.cancel()
         confirmationManager.clear()
         pendingOpenAppCandidatePackages = emptySet()
+        inAppNavigationResolver?.clear()
         voiceTurnCoordinator.cancelVoice()
         onContinuousListeningChanged(false)
     }
@@ -202,6 +214,7 @@ class AssistantSessionManager(
         activeJob = null
         confirmationManager.clear()
         pendingOpenAppCandidatePackages = emptySet()
+        inAppNavigationResolver?.clear()
         voiceTurnCoordinator.cancelVoice()
         scope.launch {
             voiceTurnCoordinator.speakResult("已取消。")
@@ -249,6 +262,7 @@ class AssistantSessionManager(
             val confirmedRequest = confirmationManager.consumeIfConfirmed(utterance)
             if (confirmedRequest != null) {
                 pendingOpenAppCandidatePackages = emptySet()
+                inAppNavigationResolver?.clear()
                 executeResponse(
                     response = confirmedRequest.response,
                     confirmed = true,
@@ -258,6 +272,7 @@ class AssistantSessionManager(
             }
             if (confirmationManager.hasPending) {
                 confirmationManager.clear()
+                inAppNavigationResolver?.clear()
                 if (confirmationManager.isCancellation(utterance)) {
                     if (stopCommandEndsContinuousListening) {
                         voiceTurnCoordinator.speakResult("已取消高风险操作。")
@@ -269,11 +284,33 @@ class AssistantSessionManager(
             }
             if (stopCommandEndsContinuousListening && isContinuousStopCommand(utterance)) {
                 pendingOpenAppCandidatePackages = emptySet()
+                inAppNavigationResolver?.clear()
                 return TurnResult.StopRequested
+            }
+            if (
+                inAppNavigationResolver?.hasPendingClarification == true &&
+                confirmationManager.isCancellation(utterance)
+            ) {
+                inAppNavigationResolver.clear()
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult("已取消。")
+                return TurnResult.Completed
             }
             if (pendingOpenAppCandidatePackages.isNotEmpty() && confirmationManager.isCancellation(utterance)) {
                 pendingOpenAppCandidatePackages = emptySet()
                 voiceTurnCoordinator.speakResult("已取消。")
+                return TurnResult.Completed
+            }
+
+            if (handleLocalWeChatDraftCommand(utterance)) {
+                return TurnResult.Completed
+            }
+
+            if (handleLocalInAppNavigation(utterance)) {
+                return TurnResult.Completed
+            }
+
+            if (handleLocalBrowserSearchCommand(utterance)) {
                 return TurnResult.Completed
             }
 
@@ -396,6 +433,123 @@ class AssistantSessionManager(
             OpenAppCommandResult.NotOpenAppCommand -> {
                 debugLog("Not a local open-app command.")
                 false
+            }
+        }
+    }
+
+    private suspend fun handleLocalBrowserSearchCommand(utterance: String): Boolean {
+        val resolver = browserSearchCommandResolver ?: return false
+        return when (val result = resolver.resolve(utterance)) {
+            is BrowserSearchCommandResult.Resolved -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult("我会用浏览器搜索${result.query}。")
+                val executor = browserSearchTaskExecutor
+                if (executor == null) {
+                    voiceTurnCoordinator.speakResult("浏览器搜索暂不可用，请稍后重试。")
+                    true
+                } else {
+                    voiceState = VoiceInteractionState.Acting
+                    when (val execution = executor.execute(result.browserPackage, result.query)) {
+                        BrowserSearchTaskResult.Completed ->
+                            voiceTurnCoordinator.speakResult("搜索已提交。")
+                        is BrowserSearchTaskResult.Stopped ->
+                            voiceTurnCoordinator.speakResult(execution.reason)
+                    }
+                    true
+                }
+            }
+
+            is BrowserSearchCommandResult.Unavailable -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult(result.spoken)
+                true
+            }
+
+            BrowserSearchCommandResult.NotBrowserSearchCommand -> false
+        }
+    }
+
+    private suspend fun handleLocalInAppNavigation(utterance: String): Boolean {
+        val resolver = inAppNavigationResolver ?: return false
+        return when (val resolution = resolver.resolve(utterance)) {
+            InAppNavigationResolution.NotCommand -> false
+            is InAppNavigationResolution.AskClarification -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult(resolution.spoken)
+                true
+            }
+            is InAppNavigationResolution.Stopped -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult(resolution.spoken)
+                true
+            }
+            is InAppNavigationResolution.Ready -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult("我会点击${resolution.targetLabel}。")
+                val executor = navigationPlanExecutor
+                if (executor == null) {
+                    voiceTurnCoordinator.speakResult("页面导航暂不可用，请稍后重试。")
+                    true
+                } else {
+                    voiceState = VoiceInteractionState.Acting
+                    when (val execution = executor.execute(resolution.plan)) {
+                        is AgentPlanExecutionResult.Completed ->
+                            voiceTurnCoordinator.speakResult("已完成页面导航。")
+                        is AgentPlanExecutionResult.Stopped ->
+                            voiceTurnCoordinator.speakResult(execution.reason)
+                        is AgentPlanExecutionResult.Invalid ->
+                            voiceTurnCoordinator.speakResult("页面导航计划无效，已停止执行。")
+                        is AgentPlanExecutionResult.ConfirmationRequired -> {
+                            val action = checkNotNull(execution.step.action)
+                            confirmationManager.store(
+                                response = AssistResponse(
+                                    spoken = "我准备点击${resolution.targetLabel}。",
+                                    requiresConfirmation = true,
+                                    actions = listOf(action),
+                                ),
+                                sourceScreen = execution.sourceScreen,
+                            )
+                            voiceTurnCoordinator.speakResult(
+                                "这是高风险操作，如需继续，请再次唤起并说确认执行。",
+                            )
+                        }
+                    }
+                    true
+                }
+            }
+        }
+    }
+
+    private suspend fun handleLocalWeChatDraftCommand(utterance: String): Boolean {
+        val resolver = weChatDraftCommandResolver ?: return false
+        return when (val result = resolver.resolve(utterance)) {
+            WeChatDraftCommandResult.NotCommand -> false
+            is WeChatDraftCommandResult.Invalid -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                inAppNavigationResolver?.clear()
+                voiceTurnCoordinator.speakResult(result.spoken)
+                true
+            }
+            is WeChatDraftCommandResult.Resolved -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                inAppNavigationResolver?.clear()
+                voiceTurnCoordinator.speakResult("我会在微信中查找${result.contact}并填写草稿。")
+                val executor = weChatDraftTaskExecutor
+                if (executor == null) {
+                    voiceTurnCoordinator.speakResult("微信草稿功能暂不可用，请稍后重试。")
+                    true
+                } else {
+                    voiceState = VoiceInteractionState.Acting
+                    when (val execution = executor.execute(result.contact, result.message)) {
+                        WeChatDraftTaskResult.DraftReady ->
+                            voiceTurnCoordinator.speakResult(
+                                "草稿已填写。发送会对外产生影响，请确认内容并手动发送；本阶段不会自动点击发送。",
+                            )
+                        is WeChatDraftTaskResult.Stopped ->
+                            voiceTurnCoordinator.speakResult(execution.reason)
+                    }
+                    true
+                }
             }
         }
     }

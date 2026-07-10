@@ -306,6 +306,77 @@ test('POST /v1/assist calls Qwen provider and validates returned protocol', asyn
   }
 });
 
+test('POST /v1/assist returns a sanitized bounded provider plan', async () => {
+  const providerPlan = {
+    spoken: '我会分步完成。',
+    requiresConfirmation: false,
+    actions: [],
+    plan: {
+      goal: '打开浏览器并等待页面稳定',
+      maxDurationMillis: 10000,
+      maxConsecutiveFailures: 2,
+      providerInternal: 'remove-me',
+      steps: [
+        {
+          id: 'open_browser',
+          kind: 'ACTION',
+          action: {
+            type: 'OPEN_APP',
+            appPackage: 'com.android.chrome',
+            providerInternal: 'remove-me'
+          },
+          precondition: { packageName: 'com.android.settings' },
+          timeoutMillis: 5000,
+          requiresConfirmation: false
+        },
+        {
+          id: 'wait_browser',
+          kind: 'WAIT_FOR_UI',
+          precondition: { packageName: 'com.android.chrome' },
+          timeoutMillis: 5000,
+          requiresConfirmation: false
+        }
+      ]
+    }
+  };
+  const { server, baseUrl } = await listen({
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.7-plus'
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify(providerPlan) } }]
+      })
+    })
+  });
+
+  try {
+    const response = await fetch(`${baseUrl}/v1/assist`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer dev-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        ...validRequest(),
+        utterance: '帮我在浏览器搜索无障碍新闻'
+      })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.actions, []);
+    assert.equal(body.plan.steps.length, 2);
+    assert.equal(body.plan.providerInternal, undefined);
+    assert.equal(body.plan.steps[0].action.providerInternal, undefined);
+  } finally {
+    await close(server);
+  }
+});
+
 test('POST /v1/assist handles clear local commands before calling provider', async () => {
   let fetchCalls = 0;
   const { server, baseUrl } = await listen({

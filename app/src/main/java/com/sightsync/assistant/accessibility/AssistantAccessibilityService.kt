@@ -18,8 +18,10 @@ import com.sightsync.assistant.MainActivity
 import com.sightsync.assistant.ai.AiServiceConnectionConfigStore
 import com.sightsync.assistant.ai.ConfiguredAiProxyClientFactory
 import com.sightsync.assistant.ai.MissingAiServiceConnectionClient
+import com.sightsync.assistant.apps.BrowserSearchCommandResolver
 import com.sightsync.assistant.apps.OpenAppCommandResolver
 import com.sightsync.assistant.apps.PackageManagerAppCatalogProvider
+import com.sightsync.assistant.apps.WeChatDraftCommandResolver
 import com.sightsync.assistant.core.ActionExecutor
 import com.sightsync.assistant.core.ScreenContextCollector
 import com.sightsync.assistant.diagnostics.AndroidDiagnosticLogger
@@ -75,14 +77,34 @@ class AssistantAccessibilityService : AccessibilityService() {
             audioRecorder = ShortAudioRecorder(this),
             transcriptionClient = aiProxyClient,
         )
+        val appCatalogProvider = PackageManagerAppCatalogProvider(this)
+        val openAppCommandResolver = OpenAppCommandResolver(appCatalogProvider)
+        val screenContextProvider = ScreenContextCollector(this)
+        val actionRunner = ActionExecutor(this)
+        val agentPlanExecutor = AgentPlanExecutor(screenContextProvider, actionRunner)
+        val inAppNavigationResolver = InAppNavigationCoordinator(screenContextProvider)
+        val browserSearchTaskExecutor = BrowserSearchTaskRunner(
+            screenContextProvider = screenContextProvider,
+            planExecutor = agentPlanExecutor,
+        )
+        val weChatDraftTaskExecutor = WeChatDraftTaskRunner(
+            screenContextProvider = screenContextProvider,
+            planExecutor = agentPlanExecutor,
+        )
         sessionManager = AssistantSessionManager(
             scope = scope,
             speechInput = speechInputController,
             speechOutput = ttsOutputController,
-            screenContextProvider = ScreenContextCollector(this),
+            screenContextProvider = screenContextProvider,
             assistantClient = aiProxyClient,
-            actionRunner = ActionExecutor(this),
-            openAppCommandResolver = OpenAppCommandResolver(PackageManagerAppCatalogProvider(this)),
+            actionRunner = actionRunner,
+            openAppCommandResolver = openAppCommandResolver,
+            browserSearchCommandResolver = BrowserSearchCommandResolver(openAppCommandResolver),
+            browserSearchTaskExecutor = browserSearchTaskExecutor,
+            inAppNavigationResolver = inAppNavigationResolver,
+            navigationPlanExecutor = agentPlanExecutor,
+            weChatDraftCommandResolver = WeChatDraftCommandResolver(),
+            weChatDraftTaskExecutor = weChatDraftTaskExecutor,
             onContinuousListeningChanged = { active ->
                 if (::overlayController.isInitialized) {
                     overlayController.setListening(active)
