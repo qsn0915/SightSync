@@ -5,9 +5,11 @@ import java.io.IOException
 enum class AiProxyEndpoint {
     Assist,
     Transcribe,
+    Health,
 }
 
 enum class AiProxyErrorType {
+    ConfigurationMissing,
     Authorization,
     RateLimited,
     ProviderUnavailable,

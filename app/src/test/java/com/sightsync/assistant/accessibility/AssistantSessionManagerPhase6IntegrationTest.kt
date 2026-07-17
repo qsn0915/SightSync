@@ -133,6 +133,7 @@ private class Phase6ScreenProvider(
     private val screenContext: ScreenContext,
 ) : ScreenContextProvider {
     override suspend fun collect(): ScreenContext = screenContext
+    override suspend fun collectForValidation(): ScreenContext = collect()
 }
 
 private class Phase6FailingScreenProvider(
@@ -141,6 +142,8 @@ private class Phase6FailingScreenProvider(
     override suspend fun collect(): ScreenContext {
         throw error
     }
+
+    override suspend fun collectForValidation(): ScreenContext = collect()
 }
 
 private class Phase6AssistantClient(

@@ -36,30 +36,60 @@ class ScreenNodeTreeExtractor(
 ) {
     fun extract(root: ScreenNodeSource): List<ScreenNode> {
         val nodes = mutableListOf<ScreenNode>()
+        val rootHeight = root.bounds.height().takeIf { it > 0 } ?: DEFAULT_SCREEN_HEIGHT
 
-        fun visit(snapshot: ScreenNodeSource) {
-            if (nodes.size >= maxNodes) return
+        fun visit(
+            snapshot: ScreenNodeSource,
+            depth: Int,
+            childIndex: Int,
+            parentNodeId: String?,
+            nearestScrollContainerId: String?,
+            previousSiblingLabel: String?,
+        ): String? {
+            if (nodes.size >= maxNodes) return null
 
             val role = snapshot.className?.substringAfterLast('.')?.ifBlank { null } ?: "Unknown"
+            val rawText = snapshot.text.trimToNull()
+            val rawDescription = snapshot.contentDescription.trimToNull()
             val text = SensitiveTextRedactor.redact(
-                snapshot.text.trimToNull(),
+                rawText,
                 role = role,
                 isPassword = snapshot.password,
+                context = rawDescription,
             )
             val description = SensitiveTextRedactor.redact(
-                snapshot.contentDescription.trimToNull(),
+                rawDescription,
                 role = role,
                 isPassword = snapshot.password,
+                context = rawText,
             )
+            val sensitive = SensitiveTextRedactor.isSensitive(
+                value = rawText,
+                role = role,
+                isPassword = snapshot.password,
+                context = rawDescription,
+            )
+            val privacySensitive = sensitive || snapshot.password ||
+                wasRedacted(rawText, text) ||
+                wasRedacted(rawDescription, description)
             val hasUsefulContent = !text.isNullOrBlank() ||
                 !description.isNullOrBlank() ||
                 snapshot.clickable ||
                 snapshot.editable ||
                 snapshot.scrollable
 
+            var currentNodeId: String? = null
+            var currentScrollContainerId = nearestScrollContainerId
             if (hasUsefulContent) {
+                currentNodeId = "node_${nodes.size}"
+                val actionableType = when {
+                    snapshot.editable -> "input"
+                    snapshot.scrollable -> "scroll"
+                    snapshot.clickable -> "click"
+                    else -> null
+                }
                 nodes += ScreenNode(
-                    nodeId = "node_${nodes.size}",
+                    nodeId = currentNodeId,
                     text = text,
                     contentDescription = description,
                     role = role,
@@ -67,30 +97,145 @@ class ScreenNodeTreeExtractor(
                     clickable = snapshot.clickable,
                     editable = snapshot.editable,
                     scrollable = snapshot.scrollable,
+                    parentNodeId = parentNodeId,
+                    depth = depth,
+                    childIndex = childIndex,
+                    region = regionFor(snapshot.bounds, rootHeight),
+                    actionableType = actionableType,
+                    scrollContainerNodeId = nearestScrollContainerId,
+                    inputContext = if (snapshot.editable) previousSiblingLabel ?: description ?: text else null,
+                    privacySensitive = privacySensitive,
+                    sensitive = sensitive,
                 )
+                if (snapshot.scrollable) currentScrollContainerId = currentNodeId
             }
 
+            var previousLabel: String? = null
             for (index in 0 until snapshot.childCount) {
-                if (nodes.size >= maxNodes) return
-                snapshot.childAt(index)?.let(::visit)
+                if (nodes.size >= maxNodes) return listOf(text, description).firstOrNull { !it.isNullOrBlank() }
+                val child = snapshot.childAt(index) ?: continue
+                val childLabel = visit(
+                    snapshot = child,
+                    depth = depth + 1,
+                    childIndex = index,
+                    parentNodeId = currentNodeId ?: parentNodeId,
+                    nearestScrollContainerId = currentScrollContainerId,
+                    previousSiblingLabel = previousLabel,
+                )
+                previousLabel = childLabel ?: previousLabel
             }
+            return listOf(text, description).firstOrNull { !it.isNullOrBlank() }
         }
 
-        visit(root)
+        visit(
+            snapshot = root,
+            depth = 0,
+            childIndex = 0,
+            parentNodeId = null,
+            nearestScrollContainerId = null,
+            previousSiblingLabel = null,
+        )
         return nodes
     }
 
     private fun String?.trimToNull(): String? = this?.trim()?.ifBlank { null }
+
+    private fun wasRedacted(raw: String?, redacted: String?): Boolean =
+        raw != null && raw != redacted
+
+    private fun regionFor(bounds: NodeBounds, rootHeight: Int): String? {
+        if (bounds.bottom <= bounds.top || rootHeight <= 0) return null
+        val centerY = (bounds.top + bounds.bottom) / 2
+        return when {
+            centerY < rootHeight / 3 -> "top"
+            centerY < rootHeight * 2 / 3 -> "middle"
+            else -> "bottom"
+        }
+    }
+
+    private fun NodeBounds.height(): Int = bottom - top
+
+    private companion object {
+        const val DEFAULT_SCREEN_HEIGHT = 2400
+    }
 }
 
 object ScreenContextPolicy {
-    fun shouldAttachScreenshot(nodes: List<ScreenNode>): Boolean {
-        if (nodes.isEmpty()) return true
+    private val sensitiveContextKeywords = listOf(
+        "支付",
+        "付款",
+        "转账",
+        "密码",
+        "验证码",
+        "wallet",
+        "payment",
+        "checkout",
+        "bank",
+        "login",
+        "auth",
+    )
+
+    fun shouldAttachScreenshot(
+        nodes: List<ScreenNode>,
+        packageName: String = "",
+        activityName: String? = null,
+        hasReliableNodeTree: Boolean = true,
+    ): Boolean = decideScreenshot(
+        nodes = nodes,
+        packageName = packageName,
+        activityName = activityName,
+        hasReliableNodeTree = hasReliableNodeTree,
+    ).attachScreenshot
+
+    fun decideScreenshot(
+        nodes: List<ScreenNode>,
+        packageName: String = "",
+        activityName: String? = null,
+        hasReliableNodeTree: Boolean = true,
+    ): ScreenshotPolicyDecision {
+        if (!hasReliableNodeTree) {
+            return ScreenshotPolicyDecision(
+                attachScreenshot = false,
+                reason = "unreliable_node_tree",
+            )
+        }
+        if (nodes.any { it.privacySensitive || it.sensitive }) {
+            return ScreenshotPolicyDecision(
+                attachScreenshot = false,
+                reason = "privacy_sensitive_content",
+                privacyBlocked = true,
+            )
+        }
+
+        val metadata = "$packageName ${activityName.orEmpty()}".lowercase()
+        if (sensitiveContextKeywords.any(metadata::contains)) {
+            return ScreenshotPolicyDecision(
+                attachScreenshot = false,
+                reason = "privacy_sensitive_context",
+                privacyBlocked = true,
+            )
+        }
+        if (nodes.isEmpty()) {
+            return ScreenshotPolicyDecision(
+                attachScreenshot = true,
+                reason = "empty_node_tree",
+            )
+        }
 
         val labeledNodes = nodes.count { node ->
             !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()
         }
 
-        return nodes.size < 3 || labeledNodes < 2
+        return if (nodes.size < 3 || labeledNodes < 2) {
+            ScreenshotPolicyDecision(
+                attachScreenshot = true,
+                reason = "sparse_node_tree",
+            )
+        } else {
+            ScreenshotPolicyDecision(
+                attachScreenshot = false,
+                reason = "node_tree_sufficient",
+            )
+        }
     }
 }

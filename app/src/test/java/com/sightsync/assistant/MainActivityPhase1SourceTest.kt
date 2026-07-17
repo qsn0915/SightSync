@@ -39,4 +39,12 @@ class MainActivityPhase1SourceTest {
         assertFalse(source.contains("仅在你点击悬浮助手后采集一次语音请求。"))
         assertFalse(source.contains("语音只在你点击悬浮入口后采集一次。"))
     }
+
+    @Test
+    fun readinessCopyRequiresAnExplicitUserActionBeforeContinuousListening() {
+        val source = File("src/main/java/com/sightsync/assistant/MainActivity.kt").readText()
+
+        assertTrue(source.contains("请通过悬浮助手显式开启连续聆听"))
+        assertFalse(source.contains("无障碍服务启动后，助手会进入连续聆听"))
+    }
 }

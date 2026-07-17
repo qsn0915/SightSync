@@ -1,25 +1,33 @@
 package com.sightsync.assistant.speech
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder.AudioSource
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.IOException
 
 class ShortAudioRecorder(
-    @Suppress("UNUSED_PARAMETER")
-    context: Context,
+    private val context: Context,
     private val sampleRate: Int = 16_000,
     private val minDurationMillis: Long = 800L,
     private val trailingSilenceMillis: Long = 900L,
     private val maxDurationMillis: Long = 8_000L,
 ) : AudioRecorder {
+    private val recorderLock = Any()
     private var recorder: AudioRecord? = null
 
     override suspend fun recordOnce(): RecordedAudio = withContext(Dispatchers.IO) {
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            throw SecurityException("record audio permission is required")
+        }
         val minBufferSize = AudioRecord.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
@@ -39,7 +47,18 @@ class ShortAudioRecorder(
             activeRecorder.release()
             throw IOException("audio recorder failed to initialize")
         }
-        recorder = activeRecorder
+        val registered = synchronized(recorderLock) {
+            if (recorder == null) {
+                recorder = activeRecorder
+                true
+            } else {
+                false
+            }
+        }
+        if (!registered) {
+            activeRecorder.release()
+            throw IOException("audio recorder is already active")
+        }
 
         try {
             activeRecorder.startRecording()
@@ -48,19 +67,17 @@ class ShortAudioRecorder(
                 trailingSilenceMillis = trailingSilenceMillis,
                 maxDurationMillis = maxDurationMillis,
             )
-            val startedAt = System.currentTimeMillis()
+            val startedAt = SystemClock.elapsedRealtime()
             var peakAmplitude = 0
             var stoppedAt = 0L
             do {
                 val read = activeRecorder.read(frame, 0, frame.size)
-                val elapsed = System.currentTimeMillis() - startedAt
+                currentCoroutineContext().ensureActive()
+                if (read <= 0) throw IOException("audio recorder read failed: $read")
+                val elapsed = SystemClock.elapsedRealtime() - startedAt
                 stoppedAt = elapsed
-                val amplitude = if (read > 0) {
-                    sampleBuffer.append(frame, read)
-                    PcmFrameEnergy.maxAmplitude(frame, read)
-                } else {
-                    0
-                }
+                sampleBuffer.append(frame, read)
+                val amplitude = PcmFrameEnergy.maxAmplitude(frame, read)
                 if (amplitude > peakAmplitude) peakAmplitude = amplitude
             } while (!detector.shouldStop(amplitude, elapsed))
             stopRecorder(activeRecorder)
@@ -74,16 +91,20 @@ class ShortAudioRecorder(
             )
         } finally {
             releaseRecorder(activeRecorder)
-            recorder = null
+            synchronized(recorderLock) {
+                if (recorder === activeRecorder) recorder = null
+            }
         }
     }
 
     override fun cancel() {
-        recorder?.let { activeRecorder ->
+        val activeRecorder = synchronized(recorderLock) {
+            recorder.also { recorder = null }
+        }
+        activeRecorder?.let {
             runCatching { activeRecorder.stop() }
             releaseRecorder(activeRecorder)
         }
-        recorder = null
     }
 
     private fun stopRecorder(activeRecorder: AudioRecord) {

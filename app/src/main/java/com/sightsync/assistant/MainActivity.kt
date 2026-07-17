@@ -34,6 +34,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -43,6 +44,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -50,6 +52,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,6 +63,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.sightsync.assistant.ai.AiServiceConnectionConfigStore
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -73,6 +79,15 @@ class MainActivity : ComponentActivity() {
 private fun SightSyncApp(viewModel: PermissionViewModel = viewModel()) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val aiServiceConnectionViewModel: AiServiceConnectionViewModel = viewModel(
+        factory = remember(context) {
+            AiServiceConnectionViewModel.factory(
+                configStore = AiServiceConnectionConfigStore.create(context.applicationContext),
+                connectionTester = AiServiceConnectionHealthTester(),
+            )
+        },
+    )
+    val aiConnectionState by aiServiceConnectionViewModel.state.collectAsStateWithLifecycle()
     var showingIntro by rememberSaveable { mutableStateOf(true) }
     var showingPrivacy by rememberSaveable { mutableStateOf(false) }
     val microphonePermissionLauncher = rememberLauncherForActivityResult(
@@ -118,10 +133,15 @@ private fun SightSyncApp(viewModel: PermissionViewModel = viewModel()) {
                 "privacy" -> PrivacyExplanationScreen(onBack = { showingPrivacy = false })
                 else -> PermissionGuideScreen(
                     state = state,
+                    aiConnectionState = aiConnectionState,
                     onOpenPrivacy = { showingPrivacy = true },
                     onOpenAccessibilitySettings = {
                         context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     },
+                    onProxyBaseUrlChanged = aiServiceConnectionViewModel::onProxyBaseUrlChanged,
+                    onAppTokenChanged = aiServiceConnectionViewModel::onAppTokenChanged,
+                    onSaveAiConnection = aiServiceConnectionViewModel::save,
+                    onTestAiConnection = aiServiceConnectionViewModel::testConnection,
                     onRequestMicrophone = {
                         microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     },
@@ -174,8 +194,13 @@ private fun WelcomeIntroScreen() {
 @Composable
 private fun PermissionGuideScreen(
     state: PermissionUiState,
+    aiConnectionState: AiServiceConnectionUiState,
     onOpenPrivacy: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onProxyBaseUrlChanged: (String) -> Unit,
+    onAppTokenChanged: (String) -> Unit,
+    onSaveAiConnection: () -> Unit,
+    onTestAiConnection: () -> Unit,
     onRequestMicrophone: () -> Unit,
     onRequestNotifications: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
@@ -198,6 +223,13 @@ private fun PermissionGuideScreen(
         ) {
             Header(state, onOpenPrivacy)
             PermissionProgressStrip(state)
+            AiServiceConnectionCard(
+                state = aiConnectionState,
+                onProxyBaseUrlChanged = onProxyBaseUrlChanged,
+                onAppTokenChanged = onAppTokenChanged,
+                onSave = onSaveAiConnection,
+                onTestConnection = onTestAiConnection,
+            )
             PermissionCard(
                 title = "开启无障碍服务",
                 description = "允许 SightSync 读取当前界面并执行你确认过的基础操作。",
@@ -226,6 +258,82 @@ private fun PermissionGuideScreen(
                 actionLabel = "打开悬浮窗设置",
                 onClick = onOpenOverlaySettings,
             )
+        }
+    }
+}
+
+@Composable
+private fun AiServiceConnectionCard(
+    state: AiServiceConnectionUiState,
+    onProxyBaseUrlChanged: (String) -> Unit,
+    onAppTokenChanged: (String) -> Unit,
+    onSave: () -> Unit,
+    onTestConnection: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFFEF8)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Color(0xFFE3E8DF), RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "AI 服务连接",
+                color = Color(0xFF101820),
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+            )
+            Text(
+                text = "配置个人云代理。手机只保存代理地址和 App token，不保存第三方 AI provider key。",
+                color = Color(0xFF4D5963),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            OutlinedTextField(
+                value = state.proxyBaseUrl,
+                onValueChange = onProxyBaseUrlChanged,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("代理地址") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            )
+            OutlinedTextField(
+                value = state.appToken,
+                onValueChange = onAppTokenChanged,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("App token") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            )
+            Text(
+                text = "当前连接状态：${state.connectionStatus.message}",
+                color = Color(0xFF29323A),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Button(
+                    onClick = onSave,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF115D5A)),
+                ) {
+                    Text("保存配置")
+                }
+                OutlinedButton(
+                    onClick = onTestConnection,
+                    enabled = !state.isTestingConnection,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("测试连接")
+                }
+            }
         }
     }
 }
@@ -356,7 +464,7 @@ private fun Header(
             )
             Text(
                 text = if (state.allGranted) {
-                    "必需权限已开启。无障碍服务启动后，助手会进入连续聆听并用语音回应。"
+                    "必需权限已开启。请通过悬浮助手显式开启连续聆听；开启后助手会用语音回应。"
                 } else {
                     "先完成权限设置，再启动可随时停止的连续聆听语音助手。"
                 },

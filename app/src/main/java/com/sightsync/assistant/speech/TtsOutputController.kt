@@ -5,6 +5,8 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
 import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 
@@ -13,12 +15,13 @@ class TtsOutputController(
     private val onUnavailable: () -> Unit = {},
 ) : SpeechOutput {
     private val pendingUtterances = PendingUtteranceRegistry<CancellableContinuation<Unit>>()
+    private val initialization = CompletableDeferred<Boolean>()
     private var textToSpeech: TextToSpeech? = null
     @Volatile
-    private var initializationFailed = false
+    private var initializationReady = false
 
     override val isAvailable: Boolean
-        get() = !initializationFailed
+        get() = initializationReady
 
     override val isSpeaking: Boolean
         get() = isAvailable && textToSpeech?.isSpeaking == true
@@ -35,7 +38,7 @@ class TtsOutputController(
                     handleInitializationFailure()
                     return@TextToSpeech
                 }
-                initializationFailed = false
+                initializationReady = true
                 activeTts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) = Unit
 
@@ -45,13 +48,14 @@ class TtsOutputController(
 
                     @Deprecated("Deprecated in Android framework")
                     override fun onError(utteranceId: String?) {
-                        completeUtterance(utteranceId)
+                        failUtterance(utteranceId, "语音播报失败。")
                     }
 
                     override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                        completeUtterance(utteranceId)
+                        cancelUtterance(utteranceId)
                     }
                 })
+                initialization.complete(true)
             } else {
                 handleInitializationFailure()
             }
@@ -66,8 +70,10 @@ class TtsOutputController(
 
     override suspend fun speakAndAwait(text: String) {
         if (text.isBlank()) return
-        if (!isAvailable) return
-        val activeTts = textToSpeech ?: return
+        if (!initialization.await() || !isAvailable) {
+            throw SpeechOutputException("语音输出初始化失败。")
+        }
+        val activeTts = textToSpeech ?: throw SpeechOutputException("语音输出不可用。")
         suspendCancellableCoroutine { continuation ->
             val utteranceId = "assistant-${System.nanoTime()}"
             pendingUtterances.put(utteranceId, continuation)
@@ -77,18 +83,19 @@ class TtsOutputController(
             }
             val result = activeTts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
             if (result == TextToSpeech.ERROR) {
-                completeUtterance(utteranceId)
+                failUtterance(utteranceId, "语音播报启动失败。")
             }
         }
     }
 
     override fun stop() {
         textToSpeech?.stop()
-        completePendingUtterances()
+        cancelPendingUtterances()
     }
 
     fun shutdown() {
         stop()
+        initialization.complete(false)
         textToSpeech?.shutdown()
         textToSpeech = null
     }
@@ -98,18 +105,36 @@ class TtsOutputController(
         if (continuation.isActive) continuation.resume(Unit)
     }
 
+    private fun failUtterance(utteranceId: String?, message: String) {
+        val continuation = pendingUtterances.remove(utteranceId) ?: return
+        if (continuation.isActive) continuation.resumeWithException(SpeechOutputException(message))
+    }
+
+    private fun cancelUtterance(utteranceId: String?) {
+        val continuation = pendingUtterances.remove(utteranceId) ?: return
+        continuation.cancel(SpeechOutputException("语音播报已中断。"))
+    }
+
     private fun handleInitializationFailure() {
-        initializationFailed = true
-        completePendingUtterances()
+        initializationReady = false
+        initialization.complete(false)
+        failPendingUtterances(SpeechOutputException("语音输出初始化失败。"))
         runCatching { textToSpeech?.shutdown() }
         textToSpeech = null
         onUnavailable()
     }
 
-    private fun completePendingUtterances() {
+    private fun failPendingUtterances(error: SpeechOutputException) {
         val pending = pendingUtterances.drain()
         pending.forEach { continuation ->
-            if (continuation.isActive) continuation.resume(Unit)
+            if (continuation.isActive) continuation.resumeWithException(error)
+        }
+    }
+
+    private fun cancelPendingUtterances() {
+        val pending = pendingUtterances.drain()
+        pending.forEach { continuation ->
+            continuation.cancel(SpeechOutputException("语音播报已中断。"))
         }
     }
 }

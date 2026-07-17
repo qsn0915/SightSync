@@ -34,7 +34,13 @@ class ProxySpeechInputControllerTest {
 
         val result = speechInput.listenOnce()
 
-        assertEquals(SpeechInputResult.Failed("我没有听清，请再说一次。"), result)
+        assertEquals(
+            SpeechInputResult.Failed(
+                message = "我没有听清，请再说一次。",
+                kind = SpeechInputFailureKind.NoSpeech,
+            ),
+            result,
+        )
     }
 
     @Test
@@ -47,7 +53,13 @@ class ProxySpeechInputControllerTest {
 
         val result = speechInput.listenOnce()
 
-        assertEquals(SpeechInputResult.Failed("我没有听清，请再说一次。"), result)
+        assertEquals(
+            SpeechInputResult.Failed(
+                message = "我没有听清，请再说一次。",
+                kind = SpeechInputFailureKind.NoSpeech,
+            ),
+            result,
+        )
         assertEquals(null, client.lastAudio)
     }
 
@@ -60,7 +72,13 @@ class ProxySpeechInputControllerTest {
 
         val result = speechInput.listenOnce()
 
-        assertEquals(SpeechInputResult.Failed("语音转写网络不可用，请检查网络后重试。"), result)
+        assertEquals(
+            SpeechInputResult.Failed(
+                message = "语音转写网络不可用，请检查网络后重试。",
+                kind = SpeechInputFailureKind.Network,
+            ),
+            result,
+        )
     }
 
     @Test
@@ -72,7 +90,14 @@ class ProxySpeechInputControllerTest {
 
         val result = speechInput.listenOnce()
 
-        assertEquals(SpeechInputResult.Failed("语音转写服务暂时不可用，请稍后重试。"), result)
+        assertEquals(
+            SpeechInputResult.Failed(
+                message = "语音转写服务暂时不可用，请稍后重试。",
+                kind = SpeechInputFailureKind.ProviderUnavailable,
+                statusCode = 503,
+            ),
+            result,
+        )
     }
 
     @Test
@@ -84,7 +109,14 @@ class ProxySpeechInputControllerTest {
 
         val result = speechInput.listenOnce()
 
-        assertEquals(SpeechInputResult.Failed("语音转写服务响应超时，请稍后重试。"), result)
+        assertEquals(
+            SpeechInputResult.Failed(
+                message = "语音转写服务响应超时，请稍后重试。",
+                kind = SpeechInputFailureKind.Timeout,
+                statusCode = 504,
+            ),
+            result,
+        )
     }
 
     @Test
@@ -96,7 +128,50 @@ class ProxySpeechInputControllerTest {
 
         val result = speechInput.listenOnce()
 
-        assertEquals(SpeechInputResult.Failed("语音转写鉴权失败，请检查代理配置。"), result)
+        assertEquals(
+            SpeechInputResult.Failed(
+                message = "语音转写鉴权失败，请检查代理配置。",
+                kind = SpeechInputFailureKind.Authorization,
+                statusCode = 401,
+            ),
+            result,
+        )
+    }
+
+    @Test
+    fun recorderIoFailureIsNotReportedAsTranscriptionNetworkFailure() = runTest {
+        val speechInput = ProxySpeechInputController(
+            FakeAudioRecorder(error = IOException("audio recorder buffer is unavailable")),
+            FakeTranscriptionClient("不应调用"),
+        )
+
+        val result = speechInput.listenOnce()
+
+        assertEquals(
+            SpeechInputResult.Failed(
+                message = "录音失败，请重试。",
+                kind = SpeechInputFailureKind.Recorder,
+            ),
+            result,
+        )
+    }
+
+    @Test
+    fun microphonePermissionFailureIsTyped() = runTest {
+        val speechInput = ProxySpeechInputController(
+            FakeAudioRecorder(error = SecurityException("permission denied")),
+            FakeTranscriptionClient("不应调用"),
+        )
+
+        val result = speechInput.listenOnce()
+
+        assertEquals(
+            SpeechInputResult.Failed(
+                message = "麦克风权限未开启，请先在应用首页开启。",
+                kind = SpeechInputFailureKind.Permission,
+            ),
+            result,
+        )
     }
 
     @Test

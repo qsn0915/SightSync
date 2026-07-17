@@ -4,17 +4,23 @@ import com.sightsync.assistant.ai.AiProtocolValidator
 import com.sightsync.assistant.ai.AiProxyErrorType
 import com.sightsync.assistant.ai.AiProxyException
 import com.sightsync.assistant.ai.AssistResponse
+import com.sightsync.assistant.apps.BrowserSearchCommandResolver
+import com.sightsync.assistant.apps.BrowserSearchCommandResult
 import com.sightsync.assistant.apps.OpenAppCommandResolver
 import com.sightsync.assistant.apps.OpenAppCommandResult
+import com.sightsync.assistant.apps.WeChatDraftCommandResolver
+import com.sightsync.assistant.apps.WeChatDraftCommandResult
 import com.sightsync.assistant.core.RiskClassifier
 import com.sightsync.assistant.core.ScreenContext
 import com.sightsync.assistant.core.ScreenContextProvider
 import com.sightsync.assistant.diagnostics.AndroidDiagnosticLogger
 import com.sightsync.assistant.diagnostics.DiagnosticLogger
 import com.sightsync.assistant.speech.SpeechInput
+import com.sightsync.assistant.speech.SpeechInputFailureKind
 import com.sightsync.assistant.speech.SpeechInputResult
 import com.sightsync.assistant.speech.SpeechOutput
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -31,23 +37,32 @@ class AssistantSessionManager(
     private val assistantClient: AssistantClient,
     private val actionRunner: ActionRunner,
     private val openAppCommandResolver: OpenAppCommandResolver? = null,
+    private val browserSearchCommandResolver: BrowserSearchCommandResolver? = null,
+    private val browserSearchTaskExecutor: BrowserSearchTaskExecutor? = null,
+    private val inAppNavigationResolver: InAppNavigationResolver? = null,
+    private val navigationPlanExecutor: AgentPlanExecutor? = null,
+    private val weChatDraftCommandResolver: WeChatDraftCommandResolver? = null,
+    private val weChatDraftTaskExecutor: WeChatDraftTaskExecutor? = null,
     private val onContinuousListeningChanged: (Boolean) -> Unit = {},
     private val diagnosticLogger: DiagnosticLogger = AndroidDiagnosticLogger,
 ) {
     private var activeJob: Job? = null
     private var continuousJob: Job? = null
+    private var continuousListeningRequested = false
+    private var continuousGeneration = 0
+    private var stopAnnouncementVersion = 0
+    private var disposed = false
     private val confirmationManager = ConfirmationManager()
     private val sessionId = UUID.randomUUID().toString()
-    private var voiceState: VoiceInteractionState = VoiceInteractionState.Idle
     private var pendingOpenAppCandidatePackages: Set<String> = emptySet()
+    private val continuousUtteranceGate = ContinuousUtteranceGate()
     private val voiceTurnCoordinator = VoiceTurnCoordinator(
         speechInput = speechInput,
         speechOutput = speechOutput,
-        onStateChanged = { state -> voiceState = state },
     )
 
     val isContinuousListening: Boolean
-        get() = continuousJob?.isActive == true
+        get() = continuousListeningRequested
 
     fun onAssistantRequested() {
         if (isContinuousListening) {
@@ -75,7 +90,9 @@ class AssistantSessionManager(
     }
 
     fun startContinuousListening() {
-        if (isContinuousListening) return
+        if (disposed || continuousListeningRequested) return
+        continuousListeningRequested = true
+        stopAnnouncementVersion += 1
 
         val running = activeJob
         if (running?.isActive == true) {
@@ -85,37 +102,109 @@ class AssistantSessionManager(
             voiceTurnCoordinator.cancelVoice()
         }
 
-        continuousJob = scope.launch {
-            try {
-                voiceTurnCoordinator.speakResult("连续聆听已开启。")
-                while (true) {
-                    val result = runAssistantTurn(
-                        promptBeforeListening = false,
-                        stopCommandEndsContinuousListening = true,
-                    )
-                    if (result == TurnResult.StopRequested) {
-                        voiceTurnCoordinator.speakResult("已停止聆听。")
-                        break
-                    }
-                }
-            } finally {
-                continuousJob = null
-                onContinuousListeningChanged(false)
-            }
-        }
         onContinuousListeningChanged(true)
+        ensureContinuousLoop()
     }
 
     fun stopContinuousListening() {
-        val running = continuousJob ?: return
-        running.cancel()
-        continuousJob = null
+        if (!continuousListeningRequested && continuousJob == null) return
+        continuousListeningRequested = false
+        val announcementVersion = ++stopAnnouncementVersion
+        val running = continuousJob
+        running?.cancel()
         onContinuousListeningChanged(false)
         confirmationManager.clear()
         pendingOpenAppCandidatePackages = emptySet()
+        inAppNavigationResolver?.clear()
         voiceTurnCoordinator.cancelVoice()
-        scope.launch {
-            voiceTurnCoordinator.speakResult("已停止聆听。")
+        announceStoppedAfterCleanup(running, announcementVersion)
+    }
+
+    fun dispose() {
+        if (disposed) return
+        disposed = true
+        continuousListeningRequested = false
+        stopAnnouncementVersion += 1
+        activeJob?.cancel()
+        activeJob = null
+        continuousJob?.cancel()
+        confirmationManager.clear()
+        pendingOpenAppCandidatePackages = emptySet()
+        inAppNavigationResolver?.clear()
+        voiceTurnCoordinator.cancelVoice()
+        onContinuousListeningChanged(false)
+    }
+
+    private fun ensureContinuousLoop() {
+        if (disposed || !continuousListeningRequested || continuousJob != null) return
+        val generation = ++continuousGeneration
+        val job = scope.launch {
+            runContinuousLoop(generation)
+        }
+        continuousJob = job
+        job.invokeOnCompletion {
+            scope.launch {
+                if (continuousJob !== job) return@launch
+                continuousJob = null
+                debugLog("Continuous listening generation=$generation completed")
+                if (!disposed && continuousListeningRequested) {
+                    ensureContinuousLoop()
+                }
+            }
+        }
+    }
+
+    private suspend fun runContinuousLoop(generation: Int) {
+        debugLog("Continuous listening generation=$generation started")
+        voiceTurnCoordinator.speakResult("连续聆听已开启。")
+        var consecutiveServiceFailures = 0
+        var turn = 0
+        while (true) {
+            turn += 1
+            debugLog("Continuous listening generation=$generation turn=$turn listening")
+            val result = runAssistantTurn(
+                promptBeforeListening = false,
+                stopCommandEndsContinuousListening = true,
+                suppressServiceFailurePrompt = consecutiveServiceFailures > 0,
+            )
+            when (result) {
+                TurnResult.Completed -> consecutiveServiceFailures = 0
+                TurnResult.Ignored -> Unit
+                TurnResult.ServiceFailure -> {
+                    consecutiveServiceFailures += 1
+                    if (consecutiveServiceFailures >= MAX_CONSECUTIVE_SERVICE_FAILURES) {
+                        continuousListeningRequested = false
+                        onContinuousListeningChanged(false)
+                        voiceTurnCoordinator.speakResult("服务仍不可用，已暂停连续聆听，请检查连接后再开启。")
+                        break
+                    }
+                }
+                TurnResult.StopRequested -> {
+                    continuousListeningRequested = false
+                    onContinuousListeningChanged(false)
+                    voiceTurnCoordinator.speakResult("已停止聆听。")
+                    break
+                }
+            }
+        }
+    }
+
+    private fun announceStoppedAfterCleanup(running: Job?, announcementVersion: Int) {
+        val announce = {
+            scope.launch {
+                if (
+                    !disposed &&
+                    !continuousListeningRequested &&
+                    stopAnnouncementVersion == announcementVersion
+                ) {
+                    voiceTurnCoordinator.speakResult("已停止聆听。")
+                }
+            }
+        }
+        if (running == null || running.isCompleted) {
+            announce()
+        } else {
+            running.invokeOnCompletion { announce() }
         }
     }
 
@@ -124,6 +213,7 @@ class AssistantSessionManager(
         activeJob = null
         confirmationManager.clear()
         pendingOpenAppCandidatePackages = emptySet()
+        inAppNavigationResolver?.clear()
         voiceTurnCoordinator.cancelVoice()
         scope.launch {
             voiceTurnCoordinator.speakResult("已取消。")
@@ -133,31 +223,42 @@ class AssistantSessionManager(
     private suspend fun runAssistantTurn(
         promptBeforeListening: Boolean,
         stopCommandEndsContinuousListening: Boolean,
+        suppressServiceFailurePrompt: Boolean = false,
     ): TurnResult {
         return try {
             val speechResult = voiceTurnCoordinator.listenForTurn(
                 prompt = if (promptBeforeListening) "请说。" else null,
             )
-            val utterance = when (speechResult) {
+            val recognizedUtterance = when (speechResult) {
                 is SpeechInputResult.Recognized -> speechResult.text.trim()
                 is SpeechInputResult.Failed -> {
-                    if (!stopCommandEndsContinuousListening || !isNoSpeechFailure(speechResult.message)) {
+                    val serviceFailure = speechResult.kind.isServiceFailure()
+                    debugLog(
+                        "Speech input failed kind=${speechResult.kind} " +
+                            "status=${speechResult.statusCode ?: "none"}",
+                    )
+                    if (
+                        (!stopCommandEndsContinuousListening || speechResult.kind != SpeechInputFailureKind.NoSpeech) &&
+                        !(serviceFailure && suppressServiceFailurePrompt)
+                    ) {
                         voiceTurnCoordinator.speakResult(speechResult.message)
                     }
-                    return TurnResult.Completed
+                    return if (serviceFailure) TurnResult.ServiceFailure else TurnResult.Completed
                 }
                 SpeechInputResult.Cancelled -> return TurnResult.Completed
             }
-            if (utterance.isBlank()) {
+            if (recognizedUtterance.isBlank()) {
                 if (!stopCommandEndsContinuousListening) {
                     voiceTurnCoordinator.speakResult("我没有听清，请再说一次。")
                 }
                 return TurnResult.Completed
             }
-            debugLog("ASR utterance='$utterance'")
+            debugLog("ASR recognized. characters=${recognizedUtterance.length}")
+            var utterance = continuousUtteranceGate.normalize(recognizedUtterance)
             val confirmedRequest = confirmationManager.consumeIfConfirmed(utterance)
             if (confirmedRequest != null) {
                 pendingOpenAppCandidatePackages = emptySet()
+                inAppNavigationResolver?.clear()
                 executeResponse(
                     response = confirmedRequest.response,
                     confirmed = true,
@@ -167,6 +268,7 @@ class AssistantSessionManager(
             }
             if (confirmationManager.hasPending) {
                 confirmationManager.clear()
+                inAppNavigationResolver?.clear()
                 if (confirmationManager.isCancellation(utterance)) {
                     if (stopCommandEndsContinuousListening) {
                         voiceTurnCoordinator.speakResult("已取消高风险操作。")
@@ -178,7 +280,17 @@ class AssistantSessionManager(
             }
             if (stopCommandEndsContinuousListening && isContinuousStopCommand(utterance)) {
                 pendingOpenAppCandidatePackages = emptySet()
+                inAppNavigationResolver?.clear()
                 return TurnResult.StopRequested
+            }
+            if (
+                inAppNavigationResolver?.hasPendingClarification == true &&
+                confirmationManager.isCancellation(utterance)
+            ) {
+                inAppNavigationResolver.clear()
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult("已取消。")
+                return TurnResult.Completed
             }
             if (pendingOpenAppCandidatePackages.isNotEmpty() && confirmationManager.isCancellation(utterance)) {
                 pendingOpenAppCandidatePackages = emptySet()
@@ -186,12 +298,39 @@ class AssistantSessionManager(
                 return TurnResult.Completed
             }
 
+            if (handleLocalWeChatDraftCommand(utterance)) {
+                return TurnResult.Completed
+            }
+
+            if (handleLocalInAppNavigation(utterance)) {
+                return TurnResult.Completed
+            }
+
+            if (handleLocalBrowserSearchCommand(utterance)) {
+                return TurnResult.Completed
+            }
+
             if (handleLocalOpenAppCommand(utterance)) {
                 return TurnResult.Completed
             }
 
+            if (stopCommandEndsContinuousListening) {
+                when (val decision = continuousUtteranceGate.decide(utterance)) {
+                    is ContinuousUtteranceDecision.Accepted -> {
+                        utterance = decision.canonicalUtterance
+                        debugLog(
+                            "Continuous utterance accepted category=${decision.category} " +
+                                "canonical='$utterance'",
+                        )
+                    }
+                    is ContinuousUtteranceDecision.Ignored -> {
+                        debugLog("Continuous utterance ignored reason=${decision.reason}")
+                        return TurnResult.Ignored
+                    }
+                }
+            }
+
             voiceTurnCoordinator.speakResult("正在查看当前屏幕。")
-            voiceState = VoiceInteractionState.Thinking
             val screenContext = screenContextProvider.collect()
             val response = assistantClient.assist(
                 sessionId = sessionId,
@@ -204,22 +343,31 @@ class AssistantSessionManager(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (proxy: AiProxyException) {
-            voiceTurnCoordinator.speakResult(proxy.toAssistVoicePrompt())
-            TurnResult.Completed
+            debugLog("Assist failed type=${proxy.type} status=${proxy.statusCode ?: "none"}")
+            if (!suppressServiceFailurePrompt) {
+                voiceTurnCoordinator.speakResult(proxy.toAssistVoicePrompt())
+            }
+            TurnResult.ServiceFailure
         } catch (timeout: InterruptedIOException) {
-            voiceTurnCoordinator.speakResult("AI 请求超时，请稍后重试。")
-            TurnResult.Completed
+            debugLog("Assist failed type=ClientTimeout status=none")
+            if (!suppressServiceFailurePrompt) {
+                voiceTurnCoordinator.speakResult("AI 请求超时，请稍后重试。")
+            }
+            TurnResult.ServiceFailure
         } catch (network: IOException) {
-            voiceTurnCoordinator.speakResult("网络连接失败，请检查网络后重试。")
-            TurnResult.Completed
+            debugLog("Assist failed type=Network status=none")
+            if (!suppressServiceFailurePrompt) {
+                voiceTurnCoordinator.speakResult("网络连接失败，请检查网络后重试。")
+            }
+            TurnResult.ServiceFailure
         } catch (security: SecurityException) {
             voiceTurnCoordinator.speakResult("无障碍权限已关闭，请重新开启后再试。")
             TurnResult.Completed
         } catch (serialization: SerializationException) {
             voiceTurnCoordinator.speakResult("AI 返回内容无法解析，已停止执行。")
             TurnResult.Completed
-        } catch (error: Throwable) {
-            voiceTurnCoordinator.speakResult("操作失败，请重试。${error.message ?: "未知错误"}")
+        } catch (_: Throwable) {
+            voiceTurnCoordinator.speakResult("操作失败，请重试。")
             TurnResult.Completed
         }
     }
@@ -229,8 +377,16 @@ class AssistantSessionManager(
         return normalized in setOf("停止", "停止聆听", "停止监听", "停止助手", "暂停助手", "取消", "退出")
     }
 
-    private fun isNoSpeechFailure(message: String): Boolean =
-        message == "我没有听清，请再说一次。"
+    private fun SpeechInputFailureKind.isServiceFailure(): Boolean =
+        this in setOf(
+            SpeechInputFailureKind.Configuration,
+            SpeechInputFailureKind.Authorization,
+            SpeechInputFailureKind.RateLimited,
+            SpeechInputFailureKind.ProviderUnavailable,
+            SpeechInputFailureKind.Timeout,
+            SpeechInputFailureKind.Network,
+            SpeechInputFailureKind.ResponseInvalid,
+        )
 
     private suspend fun handleLocalOpenAppCommand(utterance: String): Boolean {
         val resolver = openAppCommandResolver ?: return false
@@ -243,28 +399,31 @@ class AssistantSessionManager(
         )) {
             is OpenAppCommandResult.Resolved -> {
                 pendingOpenAppCandidatePackages = emptySet()
-                debugLog("Local open-app resolved. actions=${result.response.actions}")
+                debugLog(
+                    "Local open-app resolved. actions=${result.response.actions.size} " +
+                        "types=${result.response.actions.joinToString(",") { it.type }}",
+                )
                 processPlannedResponse(utterance, result.response, localActionScreenContext())
                 true
             }
 
             is OpenAppCommandResult.Ambiguous -> {
                 pendingOpenAppCandidatePackages = result.candidatePackages
-                debugLog("Local open-app ambiguous. candidates=${result.candidatePackages}")
+                debugLog("Local open-app ambiguous. candidates=${result.candidatePackages.size}")
                 voiceTurnCoordinator.speakResult(result.response.spoken)
                 true
             }
 
             is OpenAppCommandResult.Alternatives -> {
                 pendingOpenAppCandidatePackages = result.candidatePackages
-                debugLog("Local open-app alternatives. target=${result.target} candidates=${result.candidatePackages}")
+                debugLog("Local open-app alternatives. candidates=${result.candidatePackages.size}")
                 voiceTurnCoordinator.speakResult(result.response.spoken)
                 true
             }
 
             is OpenAppCommandResult.NoMatch -> {
                 pendingOpenAppCandidatePackages = emptySet()
-                debugLog("Local open-app no match. target=${result.target}")
+                debugLog("Local open-app no match.")
                 voiceTurnCoordinator.speakResult(result.response.spoken)
                 true
             }
@@ -272,6 +431,120 @@ class AssistantSessionManager(
             OpenAppCommandResult.NotOpenAppCommand -> {
                 debugLog("Not a local open-app command.")
                 false
+            }
+        }
+    }
+
+    private suspend fun handleLocalBrowserSearchCommand(utterance: String): Boolean {
+        val resolver = browserSearchCommandResolver ?: return false
+        return when (val result = resolver.resolve(utterance)) {
+            is BrowserSearchCommandResult.Resolved -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult("我会用浏览器搜索${result.query}。")
+                val executor = browserSearchTaskExecutor
+                if (executor == null) {
+                    voiceTurnCoordinator.speakResult("浏览器搜索暂不可用，请稍后重试。")
+                    true
+                } else {
+                    when (val execution = executor.execute(result.browserPackage, result.query)) {
+                        BrowserSearchTaskResult.Completed ->
+                            voiceTurnCoordinator.speakResult("搜索已提交。")
+                        is BrowserSearchTaskResult.Stopped ->
+                            voiceTurnCoordinator.speakResult(execution.reason)
+                    }
+                    true
+                }
+            }
+
+            is BrowserSearchCommandResult.Unavailable -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult(result.spoken)
+                true
+            }
+
+            BrowserSearchCommandResult.NotBrowserSearchCommand -> false
+        }
+    }
+
+    private suspend fun handleLocalInAppNavigation(utterance: String): Boolean {
+        val resolver = inAppNavigationResolver ?: return false
+        return when (val resolution = resolver.resolve(utterance)) {
+            InAppNavigationResolution.NotCommand -> false
+            is InAppNavigationResolution.AskClarification -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult(resolution.spoken)
+                true
+            }
+            is InAppNavigationResolution.Stopped -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult(resolution.spoken)
+                true
+            }
+            is InAppNavigationResolution.Ready -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                voiceTurnCoordinator.speakResult("我会点击${resolution.targetLabel}。")
+                val executor = navigationPlanExecutor
+                if (executor == null) {
+                    voiceTurnCoordinator.speakResult("页面导航暂不可用，请稍后重试。")
+                    true
+                } else {
+                    when (val execution = executor.execute(resolution.plan)) {
+                        is AgentPlanExecutionResult.Completed ->
+                            voiceTurnCoordinator.speakResult("已完成页面导航。")
+                        is AgentPlanExecutionResult.Stopped ->
+                            voiceTurnCoordinator.speakResult(execution.reason)
+                        is AgentPlanExecutionResult.Invalid ->
+                            voiceTurnCoordinator.speakResult("页面导航计划无效，已停止执行。")
+                        is AgentPlanExecutionResult.ConfirmationRequired -> {
+                            val action = checkNotNull(execution.step.action)
+                            confirmationManager.store(
+                                response = AssistResponse(
+                                    spoken = "我准备点击${resolution.targetLabel}。",
+                                    requiresConfirmation = true,
+                                    actions = listOf(action),
+                                ),
+                                sourceScreen = execution.sourceScreen,
+                            )
+                            voiceTurnCoordinator.speakResult(
+                                "这是高风险操作，如需继续，请再次唤起并说确认执行。",
+                            )
+                        }
+                    }
+                    true
+                }
+            }
+        }
+    }
+
+    private suspend fun handleLocalWeChatDraftCommand(utterance: String): Boolean {
+        val resolver = weChatDraftCommandResolver ?: return false
+        return when (val result = resolver.resolve(utterance)) {
+            WeChatDraftCommandResult.NotCommand -> false
+            is WeChatDraftCommandResult.Invalid -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                inAppNavigationResolver?.clear()
+                voiceTurnCoordinator.speakResult(result.spoken)
+                true
+            }
+            is WeChatDraftCommandResult.Resolved -> {
+                pendingOpenAppCandidatePackages = emptySet()
+                inAppNavigationResolver?.clear()
+                voiceTurnCoordinator.speakResult("我会在微信中查找${result.contact}并填写草稿。")
+                val executor = weChatDraftTaskExecutor
+                if (executor == null) {
+                    voiceTurnCoordinator.speakResult("微信草稿功能暂不可用，请稍后重试。")
+                    true
+                } else {
+                    when (val execution = executor.execute(result.contact, result.message)) {
+                        WeChatDraftTaskResult.DraftReady ->
+                            voiceTurnCoordinator.speakResult(
+                                "草稿已填写。发送会对外产生影响，请确认内容并手动发送；本阶段不会自动点击发送。",
+                            )
+                        is WeChatDraftTaskResult.Stopped ->
+                            voiceTurnCoordinator.speakResult(execution.reason)
+                    }
+                    true
+                }
             }
         }
     }
@@ -314,7 +587,6 @@ class AssistantSessionManager(
             voiceTurnCoordinator.speakResult(response.spoken)
         }
         if (response.actions.isEmpty()) return
-        voiceState = VoiceInteractionState.Acting
         val results = actionRunner.execute(response.actions, confirmed, sourceScreen)
         val failed = results.firstOrNull { !it.success }
         if (failed != null) {
@@ -327,6 +599,8 @@ class AssistantSessionManager(
 
     private enum class TurnResult {
         Completed,
+        Ignored,
+        ServiceFailure,
         StopRequested,
     }
 
@@ -344,6 +618,7 @@ class AssistantSessionManager(
 
     private fun AiProxyException.toAssistVoicePrompt(): String =
         when (type) {
+            AiProxyErrorType.ConfigurationMissing -> "AI 服务连接未配置，请先在应用首页填写代理地址和 App token。"
             AiProxyErrorType.Authorization -> "AI 服务鉴权失败，请检查代理配置。"
             AiProxyErrorType.RateLimited -> "AI 服务请求过于频繁，请稍后重试。"
             AiProxyErrorType.ProviderUnavailable -> "AI 服务暂时不可用，请稍后重试。"
@@ -357,5 +632,6 @@ class AssistantSessionManager(
 
     private companion object {
         const val TAG = "SightSyncSession"
+        const val MAX_CONSECUTIVE_SERVICE_FAILURES = 2
     }
 }

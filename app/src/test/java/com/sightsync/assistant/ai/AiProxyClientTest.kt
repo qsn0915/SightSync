@@ -2,7 +2,13 @@ package com.sightsync.assistant.ai
 
 import com.sightsync.assistant.core.ScreenContext
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -109,6 +115,103 @@ class AiProxyClientTest {
         assertEquals(2, interceptor.requests.size)
     }
 
+    @Test
+    fun checkHealthCallsProviderProbeEndpointWithAppToken() = runTest {
+        val interceptor = QueueInterceptor(
+            QueuedResult.Http(
+                200,
+                """{"status":"ok","provider":"configured","asrProvider":"configured","providerProbe":"ok","model":"qwen3.7-plus","asrModel":"qwen3-asr-flash"}""",
+            ),
+        )
+        val client = client(interceptor)
+
+        client.checkHealth()
+
+        assertEquals(1, interceptor.requests.size)
+        assertEquals("/v1/health", interceptor.requests.single().encodedPath)
+        assertEquals("probe=provider", interceptor.requests.single().encodedQuery)
+        assertEquals("GET", interceptor.methods.single())
+        assertEquals("Bearer test-token", interceptor.authorizationHeaders.single())
+    }
+
+    @Test
+    fun checkHealthAuthorizationFailureIsTypedAndNotRetried() = runTest {
+        val interceptor = QueueInterceptor(
+            QueuedResult.Http(401, """{"error":{"code":"authorization_failed","message":"unauthorized"}}"""),
+        )
+        val client = client(interceptor)
+
+        val error = runCatching { client.checkHealth() }.exceptionOrNull()
+
+        assertTrue(error is AiProxyException)
+        val proxyError = error as AiProxyException
+        assertEquals(AiProxyEndpoint.Health, proxyError.endpoint)
+        assertEquals(AiProxyErrorType.Authorization, proxyError.type)
+        assertEquals(401, proxyError.statusCode)
+        assertEquals(1, interceptor.requests.size)
+    }
+
+    @Test
+    fun checkHealthProviderUnavailableIsTypedAfterOneRetry() = runTest {
+        val interceptor = QueueInterceptor(
+            QueuedResult.Http(503, """{"status":"unavailable"}"""),
+            QueuedResult.Http(503, """{"status":"unavailable"}"""),
+        )
+        val client = client(interceptor)
+
+        val error = runCatching { client.checkHealth() }.exceptionOrNull()
+
+        assertTrue(error is AiProxyException)
+        val proxyError = error as AiProxyException
+        assertEquals(AiProxyEndpoint.Health, proxyError.endpoint)
+        assertEquals(AiProxyErrorType.ProviderUnavailable, proxyError.type)
+        assertEquals(503, proxyError.statusCode)
+        assertEquals(2, interceptor.requests.size)
+    }
+
+    @Test
+    fun checkHealthTransportFailureIsTypedAfterOneRetry() = runTest {
+        val interceptor = QueueInterceptor(
+            QueuedResult.Failure(IOException("no route to host")),
+            QueuedResult.Failure(IOException("no route to host")),
+        )
+        val client = client(interceptor)
+
+        val error = runCatching { client.checkHealth() }.exceptionOrNull()
+
+        assertTrue(error is AiProxyException)
+        val proxyError = error as AiProxyException
+        assertEquals(AiProxyEndpoint.Health, proxyError.endpoint)
+        assertEquals(AiProxyErrorType.Network, proxyError.type)
+        assertEquals(2, interceptor.requests.size)
+    }
+
+    @Test
+    fun cancellingAssistCancelsUnderlyingCallWithoutRetry() = runTest {
+        val interceptor = CancellationAwareInterceptor()
+        val client = AiProxyClient(
+            baseUrl = "http://proxy.test/",
+            appToken = "test-token",
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+        val requestJob = launch(Dispatchers.Default) {
+            client.assist(
+                sessionId = "session-1",
+                locale = "zh-CN",
+                utterance = "这里有什么",
+                screenContext = emptyScreenContext(),
+            )
+        }
+        val started = interceptor.started.await(2, TimeUnit.SECONDS)
+        assertTrue(started)
+
+        requestJob.cancelAndJoin()
+
+        assertTrue(interceptor.cancelObservedLatch.await(2, TimeUnit.SECONDS))
+        assertTrue(interceptor.cancelObserved.get())
+        assertEquals(1, interceptor.requestCount)
+    }
+
     private fun client(interceptor: QueueInterceptor): AiProxyClient =
         AiProxyClient(
             baseUrl = "http://proxy.test/",
@@ -127,14 +230,41 @@ class AiProxyClientTest {
         )
 }
 
+private class CancellationAwareInterceptor : Interceptor {
+    val started = CountDownLatch(1)
+    val cancelObservedLatch = CountDownLatch(1)
+    val cancelObserved = AtomicBoolean(false)
+    @Volatile
+    var requestCount: Int = 0
+
+    override fun intercept(chain: Interceptor.Chain): Response {
+        requestCount += 1
+        started.countDown()
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+        while (System.nanoTime() < deadline) {
+            if (chain.call().isCanceled()) {
+                cancelObserved.set(true)
+                cancelObservedLatch.countDown()
+                throw IOException("cancelled")
+            }
+            Thread.sleep(10)
+        }
+        throw IOException("call was not cancelled")
+    }
+}
+
 private class QueueInterceptor(
     vararg results: QueuedResult,
 ) : Interceptor {
     private val pending = ArrayDeque(results.toList())
     val requests = mutableListOf<okhttp3.HttpUrl>()
+    val methods = mutableListOf<String>()
+    val authorizationHeaders = mutableListOf<String?>()
 
     override fun intercept(chain: Interceptor.Chain): Response {
         requests += chain.request().url
+        methods += chain.request().method
+        authorizationHeaders += chain.request().header("Authorization")
         return when (val result = pending.removeFirst()) {
             is QueuedResult.Http -> Response.Builder()
                 .request(chain.request())

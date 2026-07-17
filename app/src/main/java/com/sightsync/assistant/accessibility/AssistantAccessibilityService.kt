@@ -1,5 +1,6 @@
 package com.sightsync.assistant.accessibility
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,19 +9,26 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
-import com.sightsync.assistant.BuildConfig
 import com.sightsync.assistant.MainActivity
-import com.sightsync.assistant.ai.AiProxyClient
+import com.sightsync.assistant.ai.AiServiceConnectionConfigStore
+import com.sightsync.assistant.ai.ConfiguredAiProxyClientFactory
+import com.sightsync.assistant.ai.MissingAiServiceConnectionClient
+import com.sightsync.assistant.apps.BrowserSearchCommandResolver
 import com.sightsync.assistant.apps.OpenAppCommandResolver
 import com.sightsync.assistant.apps.PackageManagerAppCatalogProvider
+import com.sightsync.assistant.apps.WeChatDraftCommandResolver
 import com.sightsync.assistant.core.ActionExecutor
 import com.sightsync.assistant.core.ScreenContextCollector
+import com.sightsync.assistant.diagnostics.AndroidDiagnosticLogger
 import com.sightsync.assistant.speech.ProxySpeechInputController
 import com.sightsync.assistant.speech.ShortAudioRecorder
 import com.sightsync.assistant.speech.TtsOutputController
@@ -32,6 +40,7 @@ import kotlinx.coroutines.cancel
 class AssistantAccessibilityService : AccessibilityService() {
     companion object {
         const val ACTION_STOP_LISTENING = "com.sightsync.assistant.action.STOP_LISTENING"
+        private const val TAG = "SightSyncSession"
         private const val SPEECH_OUTPUT_UNAVAILABLE_MESSAGE = "语音输出不可用，请检查系统 TTS 设置。"
         private const val LISTENING_CHANNEL_ID = "sightsync_continuous_listening"
         private const val LISTENING_NOTIFICATION_ID = 1001
@@ -54,22 +63,52 @@ class AssistantAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         activeService = this
+        if (::sessionManager.isInitialized) {
+            AndroidDiagnosticLogger.log(TAG, "Reusing initialized accessibility service controllers")
+            if (::overlayController.isInitialized) {
+                overlayController.show()
+                overlayController.setListening(sessionManager.isContinuousListening)
+            }
+            return
+        }
         ttsOutputController = TtsOutputController(this) {
             showSpeechOutputUnavailableFallback()
         }
-        val aiProxyClient = AiProxyClient(BuildConfig.AI_PROXY_BASE_URL, BuildConfig.APP_API_TOKEN)
+        val aiProxyClient = ConfiguredAiProxyClientFactory.create(
+            AiServiceConnectionConfigStore.create(this).load(),
+        ) ?: MissingAiServiceConnectionClient
         speechInputController = ProxySpeechInputController(
             audioRecorder = ShortAudioRecorder(this),
             transcriptionClient = aiProxyClient,
+        )
+        val appCatalogProvider = PackageManagerAppCatalogProvider(this)
+        val openAppCommandResolver = OpenAppCommandResolver(appCatalogProvider)
+        val screenContextProvider = ScreenContextCollector(this)
+        val actionRunner = ActionExecutor(this)
+        val agentPlanExecutor = AgentPlanExecutor(screenContextProvider, actionRunner)
+        val inAppNavigationResolver = InAppNavigationCoordinator(screenContextProvider)
+        val browserSearchTaskExecutor = BrowserSearchTaskRunner(
+            screenContextProvider = screenContextProvider,
+            planExecutor = agentPlanExecutor,
+        )
+        val weChatDraftTaskExecutor = WeChatDraftTaskRunner(
+            screenContextProvider = screenContextProvider,
+            planExecutor = agentPlanExecutor,
         )
         sessionManager = AssistantSessionManager(
             scope = scope,
             speechInput = speechInputController,
             speechOutput = ttsOutputController,
-            screenContextProvider = ScreenContextCollector(this),
+            screenContextProvider = screenContextProvider,
             assistantClient = aiProxyClient,
-            actionRunner = ActionExecutor(this),
-            openAppCommandResolver = OpenAppCommandResolver(PackageManagerAppCatalogProvider(this)),
+            actionRunner = actionRunner,
+            openAppCommandResolver = openAppCommandResolver,
+            browserSearchCommandResolver = BrowserSearchCommandResolver(openAppCommandResolver),
+            browserSearchTaskExecutor = browserSearchTaskExecutor,
+            inAppNavigationResolver = inAppNavigationResolver,
+            navigationPlanExecutor = agentPlanExecutor,
+            weChatDraftCommandResolver = WeChatDraftCommandResolver(),
+            weChatDraftTaskExecutor = weChatDraftTaskExecutor,
             onContinuousListeningChanged = { active ->
                 if (::overlayController.isInitialized) {
                     overlayController.setListening(active)
@@ -87,7 +126,6 @@ class AssistantAccessibilityService : AccessibilityService() {
             }
         }
         overlayController.show()
-        startVisibleListening()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
@@ -100,7 +138,7 @@ class AssistantAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         if (activeService === this) activeService = null
-        if (::sessionManager.isInitialized) sessionManager.stopContinuousListening()
+        if (::sessionManager.isInitialized) sessionManager.dispose()
         stopListeningForeground()
         if (::overlayController.isInitialized) overlayController.hide()
         if (::speechInputController.isInitialized) speechInputController.cancel()
@@ -110,11 +148,27 @@ class AssistantAccessibilityService : AccessibilityService() {
     }
 
     private fun startVisibleListening() {
+        if (!hasVisibleListeningPermissions()) {
+            Toast.makeText(
+                this,
+                "请先在主界面授予麦克风、悬浮窗和通知权限。",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
         if (!startListeningForeground()) {
             ttsOutputController.speak("无法显示连续聆听通知，请检查通知权限后重试。")
             return
         }
         sessionManager.startContinuousListening()
+    }
+
+    private fun hasVisibleListeningPermissions(): Boolean {
+        val microphoneGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        val notificationGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        return microphoneGranted && notificationGranted && Settings.canDrawOverlays(this)
     }
 
     private fun stopVisibleListening() {

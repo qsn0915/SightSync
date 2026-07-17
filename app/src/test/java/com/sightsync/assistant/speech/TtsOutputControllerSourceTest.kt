@@ -34,4 +34,26 @@ class TtsOutputControllerSourceTest {
         assertTrue(source.contains("pendingUtterances.drain()"))
         assertTrue(source.contains("if (!isAvailable) return"))
     }
+
+    @Test
+    fun ttsControllerAwaitsInitializationBeforeStartingUtterance() {
+        val source = File("src/main/java/com/sightsync/assistant/speech/TtsOutputController.kt").readText()
+
+        assertTrue(source.contains("initialization.await()"))
+        assertTrue(source.contains("initialization.complete(true)"))
+        assertTrue(source.contains("initialization.complete(false)"))
+    }
+
+    @Test
+    fun ttsErrorsAndInterruptionsDoNotCompleteAsSuccessfulSpeech() {
+        val source = File("src/main/java/com/sightsync/assistant/speech/TtsOutputController.kt").readText()
+        val errorBody = source.substringAfter("override fun onError(utteranceId: String?)")
+            .substringBefore("}")
+        val stopBody = source.substringAfter("override fun onStop(utteranceId: String?, interrupted: Boolean)")
+            .substringBefore("}")
+
+        assertTrue(source.contains("resumeWithException"))
+        assertTrue(errorBody.contains("failUtterance"))
+        assertTrue(stopBody.contains("cancelUtterance"))
+    }
 }
