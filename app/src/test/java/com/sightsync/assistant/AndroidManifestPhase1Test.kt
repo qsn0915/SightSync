@@ -52,8 +52,9 @@ class AndroidManifestPhase1Test {
         assertEquals("@xml/network_security_config", application.getAttributeNS(androidNamespace, "networkSecurityConfig"))
 
         val config = File("src/main/res/xml/network_security_config.xml").readText()
-        assertTrue(config.contains("<domain>10.0.2.2</domain>"))
-        assertTrue(config.contains("<domain>127.0.0.1</domain>"))
+        assertTrue(config.contains(">10.0.2.2</domain>"))
+        assertTrue(config.contains(">127.0.0.1</domain>"))
+        assertTrue(config.contains("includeSubdomains=\"false\""))
     }
 
     @Test

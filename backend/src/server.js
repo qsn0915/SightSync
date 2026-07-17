@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -25,10 +25,13 @@ import {
 } from './qwen-asr.js';
 
 const port = Number.parseInt(process.env.PORT || '8787', 10);
-const appToken = process.env.APP_API_TOKEN || 'dev-token';
+const host = process.env.HOST?.trim() || '127.0.0.1';
 const defaultProviderTimeoutMillis = Number.parseInt(process.env.AI_PROVIDER_TIMEOUT_MS || '20000', 10);
+const MAX_REQUEST_BYTES = 1_000_000;
+const PLACEHOLDER_TOKENS = new Set(['dev-token', 'change-me', 'changeme']);
 
 export function createServer(options = {}) {
+  const configuredAppToken = resolveAppToken(options);
   const fetchImpl = options.fetchImpl || fetch;
   const logger = options.logger || console;
   const providerTimeoutMillis = options.providerTimeoutMillis || defaultProviderTimeoutMillis;
@@ -53,22 +56,34 @@ export function createServer(options = {}) {
       errorCode = responseBody?.error?.code;
       sendJson(res, nextStatusCode, responseBody);
     };
-    const writeError = (nextStatusCode, code, message, detail) => {
+    const writeError = (nextStatusCode, code, message) => {
       const error = { code, message };
-      if (detail) error.detail = detail;
       writeJson(nextStatusCode, { error });
     };
 
+    const clientAbortController = new AbortController();
+    const abortForDisconnectedClient = () => clientAbortController.abort();
+    const abortForClosedResponse = () => {
+      if (!res.writableEnded) clientAbortController.abort();
+    };
+    req.once('aborted', abortForDisconnectedClient);
+    res.once('close', abortForClosedResponse);
+
     try {
       if (req.method === 'GET' && endpoint === '/v1/health') {
-        if (!isAuthorized(req)) {
+        if (!isAuthorized(req, configuredAppToken)) {
           writeError(401, 'authorization_failed', 'unauthorized');
           return;
         }
         const qwenConfig = getQwenConfig();
         qwenConfigForLog = qwenConfig;
         const health = parsedUrl.searchParams.get('probe') === 'provider'
-          ? await buildProviderProbeHealth(qwenConfig, fetchImpl, providerTimeoutMillis)
+          ? await buildProviderProbeHealth(
+              qwenConfig,
+              fetchImpl,
+              providerTimeoutMillis,
+              clientAbortController.signal
+            )
           : buildConfiguredHealth(qwenConfig);
         providerStatus = health.providerStatus;
         writeJson(health.statusCode, health.body);
@@ -80,15 +95,24 @@ export function createServer(options = {}) {
         return;
       }
 
-      if (!isAuthorized(req)) {
+      if (!isAuthorized(req, configuredAppToken)) {
         writeError(401, 'authorization_failed', 'unauthorized');
+        return;
+      }
+
+      if (!isJsonContentType(req.headers['content-type'])) {
+        writeError(415, 'unsupported_media_type', 'content type must be application/json');
         return;
       }
 
       let body;
       try {
         body = JSON.parse(await readBody(req));
-      } catch {
+      } catch (error) {
+        if (error instanceof RequestTooLargeError) {
+          writeError(413, 'request_too_large', 'request too large');
+          return;
+        }
         writeError(400, 'invalid_json', 'invalid json');
         return;
       }
@@ -105,7 +129,13 @@ export function createServer(options = {}) {
           writeError(503, 'provider_unavailable', 'asr provider not configured');
           return;
         }
-        const text = await callQwenAsr(body, qwenConfig, fetchImpl, providerTimeoutMillis);
+        const text = await callQwenAsr(
+          body,
+          qwenConfig,
+          fetchImpl,
+          providerTimeoutMillis,
+          clientAbortController.signal
+        );
         writeJson(200, { text });
         return;
       }
@@ -124,17 +154,29 @@ export function createServer(options = {}) {
           qwenConfig,
           fetchImpl,
           providerTimeoutMillis,
+          clientSignal: clientAbortController.signal,
           onDiagnostic: (diagnostic) => {
             assistSource = diagnostic.assistSource;
             fallbackReason = diagnostic.fallbackReason;
             providerStatus = diagnostic.providerStatus;
           }
         })
-        : await resolveGeneralAssistResponse(body, qwenConfig, fetchImpl, providerTimeoutMillis);
+        : await resolveGeneralAssistResponse(
+          body,
+          qwenConfig,
+          fetchImpl,
+          providerTimeoutMillis,
+          clientAbortController.signal
+        );
       writeJson(200, sanitizeAssistResponse(response));
     } catch (error) {
+      if (error instanceof ClientDisconnectedError) {
+        statusCode = 499;
+        errorCode = 'client_disconnected';
+        return;
+      }
       if (error instanceof ProviderTimeoutError) {
-        writeError(504, 'provider_timeout', 'ai provider timeout', error.message);
+        writeError(504, 'provider_timeout', 'ai provider timeout');
         return;
       }
       if (error instanceof ProviderHttpError) {
@@ -144,9 +186,10 @@ export function createServer(options = {}) {
         502,
         'provider_response_invalid',
         'ai response invalid',
-        error instanceof Error ? error.message : String(error)
       );
     } finally {
+      req.off('aborted', abortForDisconnectedClient);
+      res.off('close', abortForClosedResponse);
       logRequest(logger, {
         requestId,
         method: req.method,
@@ -164,11 +207,11 @@ export function createServer(options = {}) {
   });
 }
 
-async function resolveGeneralAssistResponse(request, config, fetchImpl, timeoutMillis) {
+async function resolveGeneralAssistResponse(request, config, fetchImpl, timeoutMillis, clientSignal) {
   const localResponse = createLocalAssistResponse(request);
   if (localResponse) return localResponse;
   return isQwenConfigured(config)
-    ? callQwenProvider(request, config, fetchImpl, timeoutMillis)
+    ? callQwenProvider(request, config, fetchImpl, timeoutMillis, clientSignal)
     : createFallbackAssistResponse(request);
 }
 
@@ -178,6 +221,7 @@ async function resolveScreenReadingResponse({
   qwenConfig,
   fetchImpl,
   providerTimeoutMillis,
+  clientSignal,
   onDiagnostic
 }) {
   const fallback = (reason, status) => {
@@ -198,7 +242,8 @@ async function resolveScreenReadingResponse({
       request,
       qwenConfig,
       fetchImpl,
-      providerTimeoutMillis
+      providerTimeoutMillis,
+      clientSignal
     );
     const validation = validateScreenReadingProviderResponse(
       providerResponse,
@@ -210,6 +255,7 @@ async function resolveScreenReadingResponse({
     onDiagnostic({ assistSource: 'provider', providerStatus: 200 });
     return providerResponse;
   } catch (error) {
+    if (error instanceof ClientDisconnectedError) throw error;
     if (error instanceof ProviderTimeoutError) {
       return fallback('provider_timeout');
     }
@@ -220,7 +266,7 @@ async function resolveScreenReadingResponse({
   }
 }
 
-async function callQwenProvider(request, config, fetchImpl, timeoutMillis) {
+async function callQwenProvider(request, config, fetchImpl, timeoutMillis, clientSignal) {
   const providerResponse = await fetchWithTimeout(fetchImpl, config.baseUrl, {
     method: 'POST',
     headers: {
@@ -228,7 +274,7 @@ async function callQwenProvider(request, config, fetchImpl, timeoutMillis) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(buildQwenChatCompletionRequest(request, config.model))
-  }, timeoutMillis);
+  }, timeoutMillis, clientSignal);
 
   if (!providerResponse.ok) {
     throw new ProviderHttpError(`provider returned ${providerResponse.status}`, providerResponse.status);
@@ -238,7 +284,7 @@ async function callQwenProvider(request, config, fetchImpl, timeoutMillis) {
   return parseQwenChatCompletion(payload);
 }
 
-async function callQwenAsr(request, config, fetchImpl, timeoutMillis) {
+async function callQwenAsr(request, config, fetchImpl, timeoutMillis, clientSignal) {
   const providerResponse = await fetchWithTimeout(fetchImpl, config.baseUrl, {
     method: 'POST',
     headers: {
@@ -246,7 +292,7 @@ async function callQwenAsr(request, config, fetchImpl, timeoutMillis) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(buildQwenAsrRequest(request, config.asrModel))
-  }, timeoutMillis);
+  }, timeoutMillis, clientSignal);
 
   if (!providerResponse.ok) {
     throw new ProviderHttpError(`asr provider returned ${providerResponse.status}`, providerResponse.status);
@@ -256,52 +302,100 @@ async function callQwenAsr(request, config, fetchImpl, timeoutMillis) {
   return parseQwenAsrCompletion(payload);
 }
 
-async function fetchWithTimeout(fetchImpl, url, options, timeoutMillis) {
+async function fetchWithTimeout(fetchImpl, url, options, timeoutMillis, clientSignal) {
+  if (clientSignal?.aborted) throw new ClientDisconnectedError('client disconnected');
   const controller = new AbortController();
   let timeoutId;
-  const timeout = new Promise((_, reject) => {
+  let abortReason;
+  let rejectAbort;
+  const aborted = new Promise((_, reject) => {
+    rejectAbort = reject;
     timeoutId = setTimeout(() => {
+      abortReason = new ProviderTimeoutError('provider request timed out');
       controller.abort();
-      reject(new ProviderTimeoutError('provider request timed out'));
+      reject(abortReason);
     }, timeoutMillis);
   });
+  const onClientAbort = () => {
+    if (abortReason) return;
+    abortReason = new ClientDisconnectedError('client disconnected');
+    controller.abort();
+    rejectAbort(abortReason);
+  };
+  clientSignal?.addEventListener('abort', onClientAbort, { once: true });
 
   try {
     return await Promise.race([
       fetchImpl(url, { ...options, signal: controller.signal }),
-      timeout
+      aborted
     ]);
   } catch (error) {
+    if (abortReason) throw abortReason;
     if (error?.name === 'AbortError') {
       throw new ProviderTimeoutError('provider request timed out');
     }
     throw error;
   } finally {
     clearTimeout(timeoutId);
+    clientSignal?.removeEventListener('abort', onClientAbort);
   }
 }
 
-function isAuthorized(req) {
-  return req.headers.authorization === `Bearer ${appToken}`;
+function isAuthorized(req, expectedToken) {
+  const authorization = req.headers.authorization;
+  const candidate = typeof authorization === 'string' && authorization.startsWith('Bearer ')
+    ? authorization.slice('Bearer '.length)
+    : '';
+  const expectedDigest = crypto.createHash('sha256').update(expectedToken).digest();
+  const candidateDigest = crypto.createHash('sha256').update(candidate).digest();
+  return crypto.timingSafeEqual(expectedDigest, candidateDigest);
 }
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let body = '';
-    req.setEncoding('utf8');
+    const contentLength = Number.parseInt(req.headers['content-length'] || '0', 10);
+    if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BYTES) {
+      req.resume();
+      reject(new RequestTooLargeError('request too large'));
+      return;
+    }
+
+    const chunks = [];
+    let receivedBytes = 0;
+    let tooLarge = false;
     req.on('data', (chunk) => {
-      body += chunk;
-      if (body.length > 1_000_000) {
-        reject(new Error('request too large'));
-        req.destroy();
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_REQUEST_BYTES) {
+        tooLarge = true;
+        chunks.length = 0;
+      } else if (!tooLarge) {
+        chunks.push(chunk);
       }
     });
-    req.on('end', () => resolve(body));
+    req.on('end', () => {
+      if (tooLarge) reject(new RequestTooLargeError('request too large'));
+      else resolve(Buffer.concat(chunks).toString('utf8'));
+    });
     req.on('error', reject);
   });
 }
 
+function isJsonContentType(contentType) {
+  return typeof contentType === 'string' && /^application\/json(?:\s*;|$)/iu.test(contentType);
+}
+
+function resolveAppToken(options) {
+  const hasExplicitOption = Object.prototype.hasOwnProperty.call(options, 'appToken');
+  const token = String(hasExplicitOption ? options.appToken ?? '' : process.env.APP_API_TOKEN ?? '').trim();
+  if (!token) throw new Error('APP_API_TOKEN is required');
+  if (PLACEHOLDER_TOKENS.has(token.toLowerCase())) {
+    throw new Error('APP_API_TOKEN must not use a placeholder');
+  }
+  return token;
+}
+
 function sendJson(res, statusCode, body) {
+  if (res.writableEnded || res.destroyed) return;
   res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
 }
@@ -330,14 +424,20 @@ function buildConfiguredHealth(qwenConfig) {
   };
 }
 
-async function buildProviderProbeHealth(qwenConfig, fetchImpl, timeoutMillis) {
+async function buildProviderProbeHealth(qwenConfig, fetchImpl, timeoutMillis, clientSignal) {
   const configured = buildConfiguredHealth(qwenConfig);
   if (configured.statusCode !== 200) {
     return configured;
   }
 
   try {
-    await callQwenProvider(createProviderProbeRequest(), qwenConfig, fetchImpl, timeoutMillis);
+    await callQwenProvider(
+      createProviderProbeRequest(),
+      qwenConfig,
+      fetchImpl,
+      timeoutMillis,
+      clientSignal
+    );
     return {
       statusCode: 200,
       providerStatus: 200,
@@ -351,15 +451,15 @@ async function buildProviderProbeHealth(qwenConfig, fetchImpl, timeoutMillis) {
       }
     };
   } catch (error) {
+    if (error instanceof ClientDisconnectedError) throw error;
     if (error instanceof ProviderTimeoutError) {
       return {
         statusCode: 504,
         body: {
           status: 'unavailable',
-          error: {
-            code: 'provider_timeout',
-            message: 'ai provider timeout',
-            detail: error.message
+        error: {
+          code: 'provider_timeout',
+          message: 'ai provider timeout'
           }
         }
       };
@@ -371,8 +471,7 @@ async function buildProviderProbeHealth(qwenConfig, fetchImpl, timeoutMillis) {
         status: 'unavailable',
         error: {
           code: 'provider_unavailable',
-          message: 'ai provider probe failed',
-          detail: error instanceof Error ? error.message : String(error)
+          message: 'ai provider probe failed'
         }
       }
     };
@@ -416,6 +515,8 @@ class ProviderHttpError extends Error {
 function removeUndefinedFields(event) {
   return Object.fromEntries(Object.entries(event).filter(([, value]) => value !== undefined));
 }
+class ClientDisconnectedError extends Error {}
+class RequestTooLargeError extends Error {}
 
 function isMainModule(moduleUrl, argvPath = process.argv[1]) {
   if (!argvPath) return false;
@@ -423,7 +524,7 @@ function isMainModule(moduleUrl, argvPath = process.argv[1]) {
 }
 
 if (isMainModule(import.meta.url)) {
-  createServer().listen(port, () => {
-    console.log(`AI proxy listening on http://localhost:${port}`);
+  createServer().listen(port, host, () => {
+    console.log(`AI proxy listening on http://${host}:${port}`);
   });
 }

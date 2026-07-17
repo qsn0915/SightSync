@@ -5,6 +5,14 @@
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+fun buildConfigString(value: String): String =
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
+val configuredProxyBaseUrl = providers.gradleProperty("AI_PROXY_BASE_URL")
+    .orElse("http://10.0.2.2:8787/")
+    .get()
+val configuredAppToken = providers.gradleProperty("APP_API_TOKEN").orElse("").get()
+
 android {
     namespace = "com.sightsync.assistant"
     compileSdk = 35
@@ -17,6 +25,16 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField(
+            "String",
+            "AI_PROXY_BASE_URL",
+            buildConfigString(configuredProxyBaseUrl),
+        )
+        buildConfigField(
+            "String",
+            "APP_API_TOKEN",
+            buildConfigString(configuredAppToken),
+        )
     }
 
     buildFeatures {
@@ -32,6 +50,26 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+val validateReleaseProxyConfig = tasks.register("validateReleaseProxyConfig") {
+    doLast {
+        val releaseBaseUrl = providers.gradleProperty("AI_PROXY_BASE_URL").orNull?.trim().orEmpty()
+        val releaseToken = providers.gradleProperty("APP_API_TOKEN").orNull?.trim().orEmpty()
+        if (!releaseBaseUrl.startsWith("https://")) {
+            throw GradleException("AI_PROXY_BASE_URL must start with https:// for release")
+        }
+        if (releaseToken.isBlank()) {
+            throw GradleException("APP_API_TOKEN is required for release")
+        }
+        if (releaseToken.lowercase() in setOf("dev-token", "change-me", "changeme")) {
+            throw GradleException("APP_API_TOKEN must not use a placeholder for release")
+        }
+    }
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn(validateReleaseProxyConfig)
 }
 
 dependencies {

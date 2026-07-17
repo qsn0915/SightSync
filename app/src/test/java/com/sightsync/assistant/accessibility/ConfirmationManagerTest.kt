@@ -50,7 +50,7 @@ class ConfirmationManagerTest {
 
     @Test
     fun acceptsOnlyExplicitConfirmationPhrases() {
-        listOf("确认", "确认执行", "继续执行", "执行吧").forEach { utterance ->
+        listOf("确认执行", "继续执行", "  确认 执行。 ").forEach { utterance ->
             val manager = ConfirmationManager()
             val response = AssistResponse(
                 spoken = "我会继续。",
@@ -66,19 +66,35 @@ class ConfirmationManagerTest {
     }
 
     @Test
-    fun rejectsAmbientOrAmbiguousConfirmationPhrases() {
-        listOf("好的", "行", "可以", "没问题", "对", "嗯", "弄吧", "不确认", "不要确认").forEach { utterance ->
+    fun rejectsAmbiguousOrCancelledConfirmationPhrases() {
+        listOf(
+            "好的",
+            "行",
+            "可以",
+            "没问题",
+            "对",
+            "嗯",
+            "确认",
+            "执行吧",
+            "弄吧",
+            "不确认",
+            "不要确认",
+            "不行",
+            "可以取消",
+            "取消确认执行",
+            "确认执行但取消",
+        ).forEach { utterance ->
             val manager = ConfirmationManager()
             manager.store(
-                AssistResponse(
+                response = AssistResponse(
                     spoken = "我会继续。",
                     actions = listOf(AssistantAction(type = "CLICK_NODE", nodeId = "node_ok")),
                 ),
-                screen("com.example"),
+                sourceScreen = screen("com.example"),
             )
 
-            assertNull("Expected ambiguous phrase to be rejected: $utterance", manager.consumeIfConfirmed(utterance))
-            assertTrue(manager.hasPending)
+            assertNull("Expected phrase to be rejected: $utterance", manager.consumeIfConfirmed(utterance))
+            assertTrue("Rejected phrase must not consume pending action: $utterance", manager.hasPending)
         }
     }
 
@@ -89,6 +105,24 @@ class ConfirmationManagerTest {
 
             assertTrue("Expected cancellation phrase to be recognized: $utterance", manager.isCancellation(utterance))
         }
+    }
+
+    @Test
+    fun expiresPendingActionAfterNinetySecondsUsingMonotonicTime() {
+        var nowMillis = 1_000L
+        val manager = ConfirmationManager(nowMillis = { nowMillis })
+        manager.store(
+            response = AssistResponse(
+                spoken = "我会继续。",
+                actions = listOf(AssistantAction(type = "CLICK_NODE", nodeId = "node_ok")),
+            ),
+            sourceScreen = screen("com.example"),
+        )
+
+        nowMillis += 90_001L
+
+        assertFalse(manager.hasPending)
+        assertNull(manager.consumeIfConfirmed("确认执行"))
     }
 
     private fun screen(packageName: String): ScreenContext =

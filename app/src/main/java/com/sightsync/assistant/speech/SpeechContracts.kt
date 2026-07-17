@@ -40,6 +40,8 @@ interface SpeechOutput {
     fun stop()
 }
 
+class SpeechOutputException(message: String) : IllegalStateException(message)
+
 data class RecordedAudio(
     val bytes: ByteArray,
     val mimeType: String,

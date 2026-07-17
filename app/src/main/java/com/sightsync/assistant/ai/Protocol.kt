@@ -70,6 +70,9 @@ object AiProtocolValidator {
         if (response.spoken.isBlank()) {
             return ProtocolValidationResult(false, "spoken 不能为空")
         }
+        if (response.actions.size > 1) {
+            return ProtocolValidationResult(false, "单步响应最多包含一个动作；多步任务必须使用 plan")
+        }
 
         if (response.plan != null && response.actions.isNotEmpty()) {
             return ProtocolValidationResult(false, "actions 与 plan 不能同时存在")
@@ -77,10 +80,6 @@ object AiProtocolValidator {
         if (response.plan != null && response.requiresConfirmation) {
             return ProtocolValidationResult(false, "plan 的二次确认必须声明在 ACTION 步骤上")
         }
-        if (response.plan == null && response.actions.size > 1) {
-            return ProtocolValidationResult(false, "单步响应最多包含一个动作；多步任务必须使用 plan")
-        }
-
         response.actions.forEach { action ->
             val actionValidation = validateAction(action)
             if (!actionValidation.isValid) return actionValidation

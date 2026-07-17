@@ -22,7 +22,7 @@ test('GET /v1/health returns provider unavailable when Qwen is not configured', 
   const { server, baseUrl } = await listen({ qwenConfig: {} });
   try {
     const response = await fetch(`${baseUrl}/v1/health`, {
-      headers: { 'Authorization': 'Bearer dev-token' }
+      headers: { 'Authorization': 'Bearer test-token' }
     });
     const body = await response.json();
 
@@ -48,7 +48,7 @@ test('GET /v1/health returns ok when provider is configured', async () => {
   });
   try {
     const response = await fetch(`${baseUrl}/v1/health`, {
-      headers: { 'Authorization': 'Bearer dev-token' }
+      headers: { 'Authorization': 'Bearer test-token' }
     });
     const body = await response.json();
 
@@ -79,7 +79,7 @@ test('GET /v1/health?probe=provider returns provider unavailable when configured
   });
   try {
     const response = await fetch(`${baseUrl}/v1/health?probe=provider`, {
-      headers: { 'Authorization': 'Bearer dev-token' }
+      headers: { 'Authorization': 'Bearer test-token' }
     });
     const body = await response.json();
 
@@ -87,8 +87,7 @@ test('GET /v1/health?probe=provider returns provider unavailable when configured
     assert.equal(body.status, 'unavailable');
     assert.deepEqual(body.error, {
       code: 'provider_unavailable',
-      message: 'ai provider probe failed',
-      detail: 'provider returned 403'
+      message: 'ai provider probe failed'
     });
   } finally {
     await close(server);
@@ -122,7 +121,7 @@ test('GET /v1/health?probe=provider returns ok when configured provider answers 
   });
   try {
     const response = await fetch(`${baseUrl}/v1/health?probe=provider`, {
-      headers: { 'Authorization': 'Bearer dev-token' }
+      headers: { 'Authorization': 'Bearer test-token' }
     });
     const body = await response.json();
     const providerBody = JSON.parse(capturedOptions.body);
@@ -165,7 +164,7 @@ test('request diagnostics redact tokens, provider keys, audio and screenshot bod
     await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -174,7 +173,7 @@ test('request diagnostics redact tokens, provider keys, audio and screenshot bod
         screen: {
           ...validRequest().screen,
           nodes: [{ nodeId: 'private', text: 'PRIVATE_NODE_TEXT_SHOULD_NOT_APPEAR', role: 'TextView' }],
-          screenshotBase64: 'SCREEN_BASE64_SHOULD_NOT_APPEAR'
+          screenshotBase64: 'U0NSRUVOX0JBU0U2NF9TSE9VTERfTk9UX0FQUEVBUg=='
         }
       })
     });
@@ -182,13 +181,13 @@ test('request diagnostics redact tokens, provider keys, audio and screenshot bod
     await fetch(`${baseUrl}/v1/transcribe`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         locale: 'zh-CN',
         mimeType: 'audio/mp4',
-        audioBase64: 'AUDIO_BASE64_SHOULD_NOT_APPEAR'
+        audioBase64: 'QVVESU9fQkFTRTY0X1NIT1VMRF9OT1RfQVBQRUFS'
       })
     });
 
@@ -202,11 +201,22 @@ test('request diagnostics redact tokens, provider keys, audio and screenshot bod
     assert.doesNotMatch(serializedLogs, /dev-token/);
     assert.doesNotMatch(serializedLogs, /test-qwen-key/);
     assert.doesNotMatch(serializedLogs, /PRIVATE_NODE_TEXT_SHOULD_NOT_APPEAR/);
-    assert.doesNotMatch(serializedLogs, /SCREEN_BASE64_SHOULD_NOT_APPEAR/);
-    assert.doesNotMatch(serializedLogs, /AUDIO_BASE64_SHOULD_NOT_APPEAR/);
+    assert.doesNotMatch(serializedLogs, /U0NSRUVOX0JBU0U2NF9TSE9VTERfTk9UX0FQUEVBUg==/);
+    assert.doesNotMatch(serializedLogs, /QVVESU9fQkFTRTY0X1NIT1VMRF9OT1RfQVBQRUFS/);
   } finally {
     await close(server);
   }
+});
+
+test('createServer requires an explicit non-placeholder app token', () => {
+  assert.throws(
+    () => createServer({ appToken: '' }),
+    /APP_API_TOKEN is required/
+  );
+  assert.throws(
+    () => createServer({ appToken: 'dev-token' }),
+    /APP_API_TOKEN must not use a placeholder/
+  );
 });
 
 test('POST /v1/assist requires bearer token', async () => {
@@ -224,13 +234,54 @@ test('POST /v1/assist requires bearer token', async () => {
   }
 });
 
+test('POST endpoints require JSON content type', async () => {
+  const { server, baseUrl } = await listen();
+  try {
+    const response = await fetch(`${baseUrl}/v1/assist`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer test-token',
+        'Content-Type': 'text/plain'
+      },
+      body: JSON.stringify(validRequest())
+    });
+
+    assert.equal(response.status, 415);
+  } finally {
+    await close(server);
+  }
+});
+
+test('oversized request body returns 413 without dropping the connection', async () => {
+  const { server, baseUrl } = await listen();
+  try {
+    const response = await fetch(`${baseUrl}/v1/assist`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer test-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ...validRequest(), utterance: 'x'.repeat(1_000_001) })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 413);
+    assert.deepEqual(body.error, {
+      code: 'request_too_large',
+      message: 'request too large'
+    });
+  } finally {
+    await close(server);
+  }
+});
+
 test('POST /v1/assist returns fallback response when provider is not configured', async () => {
   const { server, baseUrl } = await listen({ qwenConfig: {} });
   try {
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -280,7 +331,7 @@ test('POST /v1/assist calls Qwen provider and validates returned protocol', asyn
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -357,7 +408,7 @@ test('POST /v1/assist returns a sanitized bounded provider plan', async () => {
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -405,7 +456,7 @@ test('POST /v1/assist handles clear local commands before calling provider', asy
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -457,7 +508,7 @@ test('POST /v1/assist uses configured provider for screen reading', async () => 
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -507,7 +558,7 @@ test('POST /v1/assist falls back when provider screen reading response is unsafe
       const response = await fetch(`${baseUrl}/v1/assist`, {
         method: 'POST',
         headers: {
-          'Authorization': 'Bearer dev-token',
+          'Authorization': 'Bearer test-token',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -549,7 +600,7 @@ test('POST /v1/assist falls back when screen reading provider returns 403', asyn
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ ...validRequest(), utterance: '简短读屏' })
@@ -581,7 +632,7 @@ test('POST /v1/assist falls back when screen reading provider times out', async 
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ ...validRequest(), utterance: '详细读屏' })
@@ -612,7 +663,7 @@ test('POST /v1/assist falls back when screen reading provider returns invalid JS
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ ...validRequest(), utterance: '只说明可操作项' })
@@ -650,7 +701,7 @@ test('POST /v1/assist rejects provider actions outside the V1 allowlist', async 
     const response = await fetch(`${baseUrl}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -663,7 +714,7 @@ test('POST /v1/assist rejects provider actions outside the V1 allowlist', async 
     assert.equal(response.status, 502);
     assert.equal(body.error.code, 'provider_response_invalid');
     assert.equal(body.error.message, 'ai response invalid');
-    assert.match(body.error.detail, /unsupported action type: RUN_SCRIPT/);
+    assert.equal('detail' in body.error, false);
   } finally {
     await close(server);
   }
@@ -698,7 +749,7 @@ test('POST /v1/transcribe calls Qwen ASR and returns recognized text', async () 
     const response = await fetch(`${baseUrl}/v1/transcribe`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -725,7 +776,7 @@ test('POST /v1/transcribe returns normalized provider unavailable error when ASR
     const response = await fetch(`${baseUrl}/v1/transcribe`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -764,7 +815,7 @@ test('POST /v1/transcribe returns 504 before the Android client call timeout whe
         method: 'POST',
         signal: controller.signal,
         headers: {
-          'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer test-token',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -786,9 +837,111 @@ test('POST /v1/transcribe returns 504 before the Android client call timeout whe
     assert.equal(result.status, 504);
     assert.deepEqual(result.body.error, {
       code: 'provider_timeout',
-      message: 'ai provider timeout',
-      detail: 'provider request timed out'
+      message: 'ai provider timeout'
     });
+  } finally {
+    server.closeAllConnections?.();
+    await close(server);
+  }
+});
+
+test('health probe client disconnect aborts the in-flight provider request', async () => {
+  let markProviderStarted;
+  let markProviderAborted;
+  const diagnostics = [];
+  const providerStarted = new Promise((resolve) => { markProviderStarted = resolve; });
+  const providerAborted = new Promise((resolve) => { markProviderAborted = resolve; });
+  const { server, baseUrl } = await listen({
+    providerTimeoutMillis: 5_000,
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.6-plus'
+    },
+    fetchImpl: async (_url, options) => {
+      markProviderStarted();
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          markProviderAborted();
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
+    },
+    logger: {
+      info: (_event, diagnostic) => diagnostics.push(diagnostic)
+    }
+  });
+  const controller = new AbortController();
+  try {
+    const clientRequest = fetch(`${baseUrl}/v1/health?probe=provider`, {
+      signal: controller.signal,
+      headers: { 'Authorization': 'Bearer test-token' }
+    });
+
+    await providerStarted;
+    controller.abort();
+    await assert.rejects(clientRequest, /abort/iu);
+    const abortResult = await Promise.race([
+      providerAborted.then(() => 'aborted'),
+      delay(500).then(() => 'timed out')
+    ]);
+
+    assert.equal(abortResult, 'aborted');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(diagnostics.at(-1)?.statusCode, 499);
+  } finally {
+    server.closeAllConnections?.();
+    await close(server);
+  }
+});
+
+test('client disconnect aborts the in-flight provider request', async () => {
+  let markProviderStarted;
+  let markProviderAborted;
+  const providerStarted = new Promise((resolve) => { markProviderStarted = resolve; });
+  const providerAborted = new Promise((resolve) => { markProviderAborted = resolve; });
+  const { server, baseUrl } = await listen({
+    providerTimeoutMillis: 5_000,
+    qwenConfig: {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      apiKey: 'test-qwen-key',
+      model: 'qwen3.6-plus'
+    },
+    fetchImpl: async (_url, options) => {
+      markProviderStarted();
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          markProviderAborted();
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
+    }
+  });
+  const controller = new AbortController();
+  try {
+    const clientRequest = fetch(`${baseUrl}/v1/assist`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Authorization': 'Bearer test-token',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ...validRequest(), utterance: '请分析这个设置页面' })
+    });
+
+    await providerStarted;
+    controller.abort();
+    await assert.rejects(clientRequest, /abort/iu);
+    const abortResult = await Promise.race([
+      providerAborted.then(() => 'aborted'),
+      delay(500).then(() => 'timed out')
+    ]);
+
+    assert.equal(abortResult, 'aborted');
   } finally {
     server.closeAllConnections?.();
     await close(server);
@@ -814,7 +967,7 @@ function delay(ms) {
 }
 
 function listen(options) {
-  const server = createServer(options);
+  const server = createServer({ appToken: 'test-token', ...options });
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const address = server.address();

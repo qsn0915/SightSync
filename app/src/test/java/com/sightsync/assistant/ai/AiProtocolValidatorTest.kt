@@ -25,6 +25,22 @@ class AiProtocolValidatorTest {
     }
 
     @Test
+    fun rejectsMultipleActionsInSingleStepPhase() {
+        val response = AssistResponse(
+            spoken = "我会连续执行两个动作。",
+            actions = listOf(
+                AssistantAction(type = "GLOBAL_BACK"),
+                AssistantAction(type = "GLOBAL_HOME"),
+            ),
+        )
+
+        val result = AiProtocolValidator.validate(response)
+
+        assertFalse(result.isValid)
+        assertEquals("单步响应最多包含一个动作；多步任务必须使用 plan", result.reason)
+    }
+
+    @Test
     fun rejectsUnknownActionTypes() {
         val response = AssistResponse(
             spoken = "我会执行脚本。",

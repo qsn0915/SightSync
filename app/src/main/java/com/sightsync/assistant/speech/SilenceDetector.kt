@@ -13,13 +13,13 @@ class SilenceDetector(
 
     fun shouldStop(amplitude: Int, elapsedMillis: Long): Boolean {
         if (elapsedMillis >= maxDurationMillis) return true
-        if (elapsedMillis < minDurationMillis) return false
 
         if (amplitude >= speechAmplitudeThreshold) {
             heardSpeech = true
             silenceStartedAtMillis = null
             return false
         }
+        if (elapsedMillis < minDurationMillis) return false
 
         if (!heardSpeech) return false
 

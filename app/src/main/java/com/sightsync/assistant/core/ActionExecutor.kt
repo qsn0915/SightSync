@@ -50,22 +50,32 @@ class ActionExecutor(
         actions: List<AssistantAction>,
         confirmed: Boolean,
         sourceScreen: ScreenContext,
-    ): List<ActionResult> =
-        actions.map { executeOne(it, confirmed, sourceScreen) }
+    ): List<ActionResult> {
+        if (actions.size > 1) {
+            return listOf(ActionResult(false, "当前阶段每次最多执行一个动作。"))
+        }
+        if (actions.isEmpty()) return emptyList()
+        if (RiskClassifier.shouldRejectActionsInContext(actions, sourceScreen)) {
+            return listOf(ActionResult(false, "当前页面包含支付、密码或验证码等高风险内容，已拒绝执行。"))
+        }
+        if (!confirmed && RiskClassifier.requiresConfirmation("", actions, sourceScreen)) {
+            return listOf(ActionResult(false, "高风险操作尚未确认，已拒绝执行。"))
+        }
+        return listOf(executeOne(actions.single(), sourceScreen))
+    }
 
     private fun executeOne(
         action: AssistantAction,
-        confirmed: Boolean,
         sourceScreen: ScreenContext,
     ): ActionResult {
         return when (action.type) {
             "SPEAK" -> ActionResult(true, "已朗读。")
             "CLICK_NODE" -> clickNode(action.nodeId, sourceScreen)
             "SET_TEXT" -> setText(action.nodeId, action.text.orEmpty(), sourceScreen)
-            "SCROLL_FORWARD" -> scroll(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-            "SCROLL_BACKWARD" -> scroll(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
-            "GLOBAL_BACK" -> global(AccessibilityService.GLOBAL_ACTION_BACK, "已返回。")
-            "GLOBAL_HOME" -> global(AccessibilityService.GLOBAL_ACTION_HOME, "已回到主页。")
+            "SCROLL_FORWARD" -> scroll(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, sourceScreen)
+            "SCROLL_BACKWARD" -> scroll(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD, sourceScreen)
+            "GLOBAL_BACK" -> global(AccessibilityService.GLOBAL_ACTION_BACK, "已返回。", sourceScreen)
+            "GLOBAL_HOME" -> global(AccessibilityService.GLOBAL_ACTION_HOME, "已回到主页。", sourceScreen)
             "OPEN_APP" -> openApp(action.appPackage)
             else -> ActionResult(false, "不支持的动作：${action.type}")
         }
@@ -92,35 +102,38 @@ class ActionExecutor(
         return if (success) ActionResult(true, "已输入。") else ActionResult(false, "这个输入框无法输入。")
     }
 
-    private fun scroll(action: Int): ActionResult {
+    private fun scroll(action: Int, sourceScreen: ScreenContext): ActionResult {
         val activeService = service ?: return ActionResult(false, "无障碍服务不可用。")
         val root = activeService.rootInActiveWindow ?: return ActionResult(false, "无法读取当前页面。")
+        if (!matchesSourcePackage(root, sourceScreen)) return pageChanged()
         val scrollable = findFirst(root) { it.isScrollable }
         val success = scrollable?.performAction(action) == true
         return if (success) ActionResult(true, "已滚动。") else ActionResult(false, "当前页面不能继续滚动。")
     }
 
-    private fun global(action: Int, message: String): ActionResult {
+    private fun global(action: Int, message: String, sourceScreen: ScreenContext): ActionResult {
         val activeService = service ?: return ActionResult(false, "无障碍服务不可用。")
+        val root = activeService.rootInActiveWindow ?: return ActionResult(false, "无法读取当前页面。")
+        if (!matchesSourcePackage(root, sourceScreen)) return pageChanged()
         return if (activeService.performGlobalAction(action)) ActionResult(true, message) else ActionResult(false, "系统动作执行失败。")
     }
 
     private fun openApp(packageName: String?): ActionResult {
         if (packageName.isNullOrBlank()) return ActionResult(false, "缺少应用包名。")
-        debugLog("OPEN_APP requested. package=$packageName")
+        debugLog("OPEN_APP requested")
         return when (val result = appLauncher.launch(packageName)) {
             AppLaunchResult.Succeeded -> {
-                debugLog("OPEN_APP succeeded. package=$packageName")
+                debugLog("OPEN_APP succeeded")
                 ActionResult(true, "已打开应用。")
             }
 
             AppLaunchResult.NoLaunchIntent -> {
-                debugLog("OPEN_APP failed: no launch intent. package=$packageName")
+                debugLog("OPEN_APP failed: no launch intent")
                 ActionResult(false, "找不到这个应用的可启动入口。")
             }
 
             is AppLaunchResult.Failed -> {
-                debugLog("OPEN_APP failed. package=$packageName reason=${result.reason}")
+                debugLog("OPEN_APP failed")
                 ActionResult(false, "打开应用失败：${result.reason}")
             }
         }
@@ -135,8 +148,7 @@ class ActionExecutor(
         val targetIndex = nodeId.removePrefix("node_").toIntOrNull() ?: return NodeLookup(failure = pageChanged())
         val activeService = service ?: return NodeLookup(failure = ActionResult(false, "无障碍服务不可用。"))
         val root = activeService.rootInActiveWindow ?: return NodeLookup(failure = ActionResult(false, "无法读取当前页面。"))
-        val currentPackage = root.packageName?.toString().orEmpty()
-        if (sourceScreen.packageName.isNotBlank() && currentPackage != sourceScreen.packageName) {
+        if (!matchesSourcePackage(root, sourceScreen)) {
             return NodeLookup(failure = pageChanged())
         }
 
@@ -157,6 +169,14 @@ class ActionExecutor(
         }
 
         return NodeLookup(node = node)
+    }
+
+    private fun matchesSourcePackage(
+        root: AccessibilityNodeInfo,
+        sourceScreen: ScreenContext,
+    ): Boolean {
+        val currentPackage = root.packageName?.toString().orEmpty()
+        return sourceScreen.packageName.isBlank() || currentPackage == sourceScreen.packageName
     }
 
     private fun findFirst(

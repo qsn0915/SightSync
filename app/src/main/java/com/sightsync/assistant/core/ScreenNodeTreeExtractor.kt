@@ -55,13 +55,21 @@ class ScreenNodeTreeExtractor(
                 rawText,
                 role = role,
                 isPassword = snapshot.password,
+                context = rawDescription,
             )
             val description = SensitiveTextRedactor.redact(
                 rawDescription,
                 role = role,
                 isPassword = snapshot.password,
+                context = rawText,
             )
-            val privacySensitive = snapshot.password ||
+            val sensitive = SensitiveTextRedactor.isSensitive(
+                value = rawText,
+                role = role,
+                isPassword = snapshot.password,
+                context = rawDescription,
+            )
+            val privacySensitive = sensitive || snapshot.password ||
                 wasRedacted(rawText, text) ||
                 wasRedacted(rawDescription, description)
             val hasUsefulContent = !text.isNullOrBlank() ||
@@ -97,6 +105,7 @@ class ScreenNodeTreeExtractor(
                     scrollContainerNodeId = nearestScrollContainerId,
                     inputContext = if (snapshot.editable) previousSiblingLabel ?: description ?: text else null,
                     privacySensitive = privacySensitive,
+                    sensitive = sensitive,
                 )
                 if (snapshot.scrollable) currentScrollContainerId = currentNodeId
             }
@@ -132,7 +141,7 @@ class ScreenNodeTreeExtractor(
     private fun String?.trimToNull(): String? = this?.trim()?.ifBlank { null }
 
     private fun wasRedacted(raw: String?, redacted: String?): Boolean =
-        raw != null && redacted != null && raw != redacted
+        raw != null && raw != redacted
 
     private fun regionFor(bounds: NodeBounds, rootHeight: Int): String? {
         if (bounds.bottom <= bounds.top || rootHeight <= 0) return null
@@ -152,14 +161,57 @@ class ScreenNodeTreeExtractor(
 }
 
 object ScreenContextPolicy {
-    fun shouldAttachScreenshot(nodes: List<ScreenNode>): Boolean =
-        decideScreenshot(nodes).attachScreenshot
+    private val sensitiveContextKeywords = listOf(
+        "支付",
+        "付款",
+        "转账",
+        "密码",
+        "验证码",
+        "wallet",
+        "payment",
+        "checkout",
+        "bank",
+        "login",
+        "auth",
+    )
 
-    fun decideScreenshot(nodes: List<ScreenNode>): ScreenshotPolicyDecision {
-        if (nodes.any { it.privacySensitive }) {
+    fun shouldAttachScreenshot(
+        nodes: List<ScreenNode>,
+        packageName: String = "",
+        activityName: String? = null,
+        hasReliableNodeTree: Boolean = true,
+    ): Boolean = decideScreenshot(
+        nodes = nodes,
+        packageName = packageName,
+        activityName = activityName,
+        hasReliableNodeTree = hasReliableNodeTree,
+    ).attachScreenshot
+
+    fun decideScreenshot(
+        nodes: List<ScreenNode>,
+        packageName: String = "",
+        activityName: String? = null,
+        hasReliableNodeTree: Boolean = true,
+    ): ScreenshotPolicyDecision {
+        if (!hasReliableNodeTree) {
+            return ScreenshotPolicyDecision(
+                attachScreenshot = false,
+                reason = "unreliable_node_tree",
+            )
+        }
+        if (nodes.any { it.privacySensitive || it.sensitive }) {
             return ScreenshotPolicyDecision(
                 attachScreenshot = false,
                 reason = "privacy_sensitive_content",
+                privacyBlocked = true,
+            )
+        }
+
+        val metadata = "$packageName ${activityName.orEmpty()}".lowercase()
+        if (sensitiveContextKeywords.any(metadata::contains)) {
+            return ScreenshotPolicyDecision(
+                attachScreenshot = false,
+                reason = "privacy_sensitive_context",
                 privacyBlocked = true,
             )
         }

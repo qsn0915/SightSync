@@ -49,14 +49,45 @@ const HIGH_RISK_KEYWORDS = [
   '退出登录'
 ];
 
+const MAX_SESSION_ID_LENGTH = 128;
+const MAX_LOCALE_LENGTH = 32;
+const MAX_UTTERANCE_LENGTH = 4_000;
+const MAX_NODE_COUNT = 200;
+const MAX_NODE_TEXT_LENGTH = 1_000;
+const MAX_SCREENSHOT_BASE64_LENGTH = 900_000;
+const MAX_AUDIO_BASE64_LENGTH = 900_000;
+
 export function validateAssistRequest(body) {
-  if (!body || typeof body !== 'object') return invalid('request body is required');
+  if (!isPlainObject(body)) return invalid('request body is required');
   if (!isNonEmptyString(body.sessionId)) return invalid('sessionId is required');
+  if (body.sessionId.length > MAX_SESSION_ID_LENGTH) return invalid('sessionId is too long');
   if (!isNonEmptyString(body.locale)) return invalid('locale is required');
+  if (body.locale.length > MAX_LOCALE_LENGTH) return invalid('locale is too long');
   if (!isNonEmptyString(body.utterance)) return invalid('utterance is required');
-  if (!body.screen || typeof body.screen !== 'object') return invalid('screen is required');
+  if (body.utterance.length > MAX_UTTERANCE_LENGTH) return invalid('utterance is too long');
+  if (!isPlainObject(body.screen)) return invalid('screen is required');
   if (!isNonEmptyString(body.screen.packageName)) return invalid('screen.packageName is required');
+  if (body.screen.packageName.length > 255) return invalid('screen.packageName is too long');
+  if (body.screen.activityName != null && typeof body.screen.activityName !== 'string') {
+    return invalid('screen.activityName must be a string or null');
+  }
   if (!Array.isArray(body.screen.nodes)) return invalid('screen.nodes must be an array');
+  if (body.screen.nodes.length > MAX_NODE_COUNT) return invalid('screen.nodes exceeds limit');
+  for (const node of body.screen.nodes) {
+    const nodeValidation = validateScreenNode(node);
+    if (!nodeValidation.valid) return nodeValidation;
+  }
+  if (body.screen.screenshotBase64 != null) {
+    if (typeof body.screen.screenshotBase64 !== 'string') {
+      return invalid('screen.screenshotBase64 must be a string or null');
+    }
+    if (body.screen.screenshotBase64.length > MAX_SCREENSHOT_BASE64_LENGTH) {
+      return invalid('screen.screenshotBase64 is too large');
+    }
+    if (!isValidBase64(body.screen.screenshotBase64)) {
+      return invalid('screen.screenshotBase64 must be valid base64');
+    }
+  }
   return { valid: true };
 }
 
@@ -67,6 +98,7 @@ export function validateAssistResponse(response) {
     return invalid('requiresConfirmation must be boolean');
   }
   if (!Array.isArray(response.actions)) return invalid('actions must be an array');
+  if (response.actions.length > 1) return invalid('only one action is allowed');
 
   if (response.plan != null && response.actions.length > 0) {
     return invalid('actions and plan are mutually exclusive');
@@ -92,8 +124,12 @@ export function validateAssistResponse(response) {
 }
 
 export function validateTranscribeRequest(body) {
-  if (!body || typeof body !== 'object') return invalid('request body is required');
+  if (!isPlainObject(body)) return invalid('request body is required');
+  if (!isNonEmptyString(body.locale)) return invalid('locale is required');
+  if (body.locale.length > MAX_LOCALE_LENGTH) return invalid('locale is too long');
   if (!isNonEmptyString(body.audioBase64)) return invalid('audioBase64 is required');
+  if (body.audioBase64.length > MAX_AUDIO_BASE64_LENGTH) return invalid('audioBase64 is too large');
+  if (!isValidBase64(body.audioBase64)) return invalid('audioBase64 must be valid base64');
   if (!isNonEmptyString(body.mimeType)) return invalid('mimeType is required');
   if (!ALLOWED_AUDIO_MIME_TYPES.has(body.mimeType)) {
     return invalid(`unsupported audio mimeType: ${body.mimeType}`);
@@ -342,14 +378,6 @@ function sanitizeAgentPlan(plan) {
   };
 }
 
-function sanitizeAction(action) {
-  return Object.fromEntries(
-    ['type', 'nodeId', 'text', 'appPackage']
-      .filter((key) => action[key] !== undefined)
-      .map((key) => [key, action[key]])
-  );
-}
-
 function sanitizePageExpectation(expectation) {
   return Object.fromEntries(
     ['packageName', 'activityName', 'requiredNodeIds', 'requiredTexts']
@@ -360,6 +388,47 @@ function sanitizePageExpectation(expectation) {
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateScreenNode(node) {
+  if (!isPlainObject(node)) return invalid('screen node must be an object');
+  for (const field of ['nodeId', 'text', 'contentDescription', 'role']) {
+    if (node[field] != null && typeof node[field] !== 'string') {
+      return invalid(`screen node ${field} must be a string or null`);
+    }
+    if (typeof node[field] === 'string' && node[field].length > MAX_NODE_TEXT_LENGTH) {
+      return invalid(`screen node ${field} is too long`);
+    }
+  }
+  for (const field of ['clickable', 'editable', 'scrollable', 'sensitive']) {
+    if (node[field] != null && typeof node[field] !== 'boolean') {
+      return invalid(`screen node ${field} must be boolean`);
+    }
+  }
+  return { valid: true };
+}
+
+function isValidBase64(value) {
+  return value.length > 0 &&
+    value.length % 4 === 0 &&
+    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value);
+}
+
+function sanitizeAction(action) {
+  switch (action.type) {
+    case 'CLICK_NODE':
+      return { type: action.type, nodeId: action.nodeId };
+    case 'SET_TEXT':
+      return { type: action.type, nodeId: action.nodeId, text: action.text };
+    case 'OPEN_APP':
+      return { type: action.type, appPackage: action.appPackage };
+    default:
+      return { type: action.type };
+  }
 }
 
 function createDirectActionResponse(utterance) {

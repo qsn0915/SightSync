@@ -11,6 +11,7 @@ test('server starts when executed as the main script on Windows paths', async ()
     env: {
       ...process.env,
       PORT: String(port),
+      APP_API_TOKEN: 'process-test-token',
       QWEN_API_KEY: '',
       DASHSCOPE_API_KEY: '',
       AI_API_KEY: ''
@@ -21,11 +22,12 @@ test('server starts when executed as the main script on Windows paths', async ()
   try {
     const output = await waitForOutput(child, /AI proxy listening/, 2_000);
     assert.match(output, /AI proxy listening/);
+    assert.match(output, /127\.0\.0\.1/);
 
     const response = await fetch(`http://127.0.0.1:${port}/v1/assist`, {
       method: 'POST',
       headers: {
-        'Authorization': 'Bearer dev-token',
+        'Authorization': 'Bearer process-test-token',
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({

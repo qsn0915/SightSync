@@ -50,11 +50,7 @@ object NodeMatcher {
             .map(::normalize)
             .filter { it.isNotBlank() }
         return expectedLabels.any { expectedLabel ->
-            currentLabels.any { currentLabel ->
-                currentLabel == expectedLabel ||
-                    currentLabel.contains(expectedLabel) ||
-                    expectedLabel.contains(currentLabel)
-            }
+            currentLabels.any { currentLabel -> currentLabel == expectedLabel }
         }
     }
 
@@ -62,7 +58,7 @@ object NodeMatcher {
         value.lowercase().filterNot { it.isWhitespace() || it in "，。！？、,.!?:" }
 
     private fun boundsAreClose(current: NodeBounds, expected: NodeBounds): Boolean {
-        if (current.isEmpty() || expected.isEmpty()) return true
+        if (current.isEmpty() || expected.isEmpty()) return current.isEmpty() && expected.isEmpty()
         return kotlin.math.abs(current.left - expected.left) <= MAX_BOUNDS_DELTA_PX &&
             kotlin.math.abs(current.top - expected.top) <= MAX_BOUNDS_DELTA_PX &&
             kotlin.math.abs(current.right - expected.right) <= MAX_BOUNDS_DELTA_PX &&
@@ -72,5 +68,5 @@ object NodeMatcher {
     private fun NodeBounds.isEmpty(): Boolean =
         left == 0 && top == 0 && right == 0 && bottom == 0
 
-    private const val MAX_BOUNDS_DELTA_PX = 100
+    private const val MAX_BOUNDS_DELTA_PX = 24
 }

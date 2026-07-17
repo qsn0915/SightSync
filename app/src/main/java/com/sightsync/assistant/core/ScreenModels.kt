@@ -28,6 +28,7 @@ data class ScreenNode(
     val scrollContainerNodeId: String? = null,
     val inputContext: String? = null,
     val privacySensitive: Boolean = false,
+    val sensitive: Boolean = false,
 )
 
 @Serializable

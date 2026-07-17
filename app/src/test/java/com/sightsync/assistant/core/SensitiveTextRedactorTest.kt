@@ -16,6 +16,18 @@ class SensitiveTextRedactorTest {
     }
 
     @Test
+    fun redactsVerificationCodeWhenLabelIsInSiblingField() {
+        assertEquals(
+            "[验证码已隐藏]",
+            SensitiveTextRedactor.redact(
+                value = "123456",
+                role = "EditText",
+                context = "短信验证码",
+            ),
+        )
+    }
+
+    @Test
     fun redactsLongCardLikeNumbers() {
         assertEquals("[号码已隐藏]", SensitiveTextRedactor.redact("6222021234567890123", role = "TextView"))
     }
