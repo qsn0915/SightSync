@@ -290,4 +290,3 @@ Append this bullet under current progress in `SIGHTSYNC_LONG_TERM_PLAN.md`:
 - Spec coverage: The plan covers backend health check, bearer-token authorization, provider availability, and normalized error bodies. It intentionally does not wire Android dynamic proxy use; that belongs to Phase 2 slice 4.
 - Placeholder scan: No TBD/TODO placeholders remain.
 - Type consistency: Error envelope is consistently `{ error: { code, message, detail? } }`; health success is `{ status, provider, asrProvider }`.
-
