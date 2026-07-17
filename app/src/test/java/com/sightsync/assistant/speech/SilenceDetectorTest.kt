@@ -41,4 +41,18 @@ class SilenceDetectorTest {
 
         assertTrue(detector.heardSpeech)
     }
+
+    @Test
+    fun remembersSpeechThatStartsBeforeMinimumRecordingDuration() {
+        val detector = SilenceDetector(
+            minDurationMillis = 800,
+            trailingSilenceMillis = 900,
+            speechAmplitudeThreshold = 1_200,
+        )
+
+        assertFalse(detector.shouldStop(amplitude = 2_000, elapsedMillis = 100))
+        assertTrue(detector.heardSpeech)
+        assertFalse(detector.shouldStop(amplitude = 100, elapsedMillis = 800))
+        assertTrue(detector.shouldStop(amplitude = 100, elapsedMillis = 1_700))
+    }
 }

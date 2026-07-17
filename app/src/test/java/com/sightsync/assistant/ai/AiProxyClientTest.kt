@@ -2,7 +2,13 @@ package com.sightsync.assistant.ai
 
 import com.sightsync.assistant.core.ScreenContext
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -109,6 +115,32 @@ class AiProxyClientTest {
         assertEquals(2, interceptor.requests.size)
     }
 
+    @Test
+    fun cancellingAssistCancelsUnderlyingCallWithoutRetry() = runTest {
+        val interceptor = CancellationAwareInterceptor()
+        val client = AiProxyClient(
+            baseUrl = "http://proxy.test/",
+            appToken = "test-token",
+            httpClient = OkHttpClient.Builder().addInterceptor(interceptor).build(),
+        )
+        val requestJob = launch(Dispatchers.Default) {
+            client.assist(
+                sessionId = "session-1",
+                locale = "zh-CN",
+                utterance = "这里有什么",
+                screenContext = emptyScreenContext(),
+            )
+        }
+        val started = interceptor.started.await(2, TimeUnit.SECONDS)
+        assertTrue(started)
+
+        requestJob.cancelAndJoin()
+
+        assertTrue(interceptor.cancelObservedLatch.await(2, TimeUnit.SECONDS))
+        assertTrue(interceptor.cancelObserved.get())
+        assertEquals(1, interceptor.requestCount)
+    }
+
     private fun client(interceptor: QueueInterceptor): AiProxyClient =
         AiProxyClient(
             baseUrl = "http://proxy.test/",
@@ -125,6 +157,29 @@ class AiProxyClientTest {
             nodes = emptyList(),
             screenshotBase64 = null,
         )
+}
+
+private class CancellationAwareInterceptor : Interceptor {
+    val started = CountDownLatch(1)
+    val cancelObservedLatch = CountDownLatch(1)
+    val cancelObserved = AtomicBoolean(false)
+    @Volatile
+    var requestCount: Int = 0
+
+    override fun intercept(chain: Interceptor.Chain): Response {
+        requestCount += 1
+        started.countDown()
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+        while (System.nanoTime() < deadline) {
+            if (chain.call().isCanceled()) {
+                cancelObserved.set(true)
+                cancelObservedLatch.countDown()
+                throw IOException("cancelled")
+            }
+            Thread.sleep(10)
+        }
+        throw IOException("call was not cancelled")
+    }
 }
 
 private class QueueInterceptor(

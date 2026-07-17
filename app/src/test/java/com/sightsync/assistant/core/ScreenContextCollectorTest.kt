@@ -1,11 +1,25 @@
 package com.sightsync.assistant.core
 
+import java.io.File
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ScreenContextCollectorTest {
+    @Test
+    fun screenshotCallbackCopiesBeforeClosingBufferAndHandlesCancellation() {
+        val source = File("src/main/java/com/sightsync/assistant/core/ScreenContextCollector.kt").readText()
+        val copyIndex = source.indexOf("bitmap.copy")
+        val closeIndex = source.indexOf("hardwareBuffer.close()")
+
+        assertTrue(copyIndex >= 0)
+        assertTrue(closeIndex > copyIndex)
+        assertTrue(source.contains("if (!continuation.isActive)"))
+        assertTrue(source.contains("copy?.recycle()"))
+    }
+
     @Test
     fun richNodeTreeKeepsPackageAndActivityWithoutScreenshot() = runTest {
         var screenshotCalls = 0
@@ -67,7 +81,7 @@ class ScreenContextCollectorTest {
     }
 
     @Test
-    fun missingRootStillReturnsMetadataAndAttemptsScreenshot() = runTest {
+    fun missingRootReturnsMetadataWithoutCapturingUnknownScreen() = runTest {
         var screenshotCalls = 0
         val assembler = ScreenContextAssembler(
             nodeTreeExtractor = ScreenNodeTreeExtractor(),
@@ -87,6 +101,61 @@ class ScreenContextCollectorTest {
         assertEquals("Unknown", context.activityName)
         assertEquals(emptyList<ScreenNode>(), context.nodes)
         assertNull(context.screenshotBase64)
-        assertEquals(1, screenshotCalls)
+        assertEquals(0, screenshotCalls)
+    }
+
+    @Test
+    fun sensitiveSparseNodeTreeNeverAttachesScreenshot() = runTest {
+        var screenshotCalls = 0
+        val assembler = ScreenContextAssembler(
+            nodeTreeExtractor = ScreenNodeTreeExtractor(),
+            screenshotProvider = ScreenshotProvider {
+                screenshotCalls += 1
+                "must-not-be-captured"
+            },
+        )
+        val root = ScreenNodeSnapshot(
+            children = listOf(
+                ScreenNodeSnapshot(
+                    text = "123456",
+                    contentDescription = "短信验证码",
+                    className = "android.widget.EditText",
+                    editable = true,
+                ),
+            ),
+        )
+
+        val context = assembler.collectFrom(
+            packageName = "com.example.login",
+            activityName = "Verify",
+            root = root,
+        )
+
+        assertNull(context.screenshotBase64)
+        assertEquals("[验证码已隐藏]", context.nodes.single().text)
+        assertEquals(0, screenshotCalls)
+    }
+
+    @Test
+    fun sensitivePackageNameNeverAttachesScreenshot() = runTest {
+        var screenshotCalls = 0
+        val assembler = ScreenContextAssembler(
+            nodeTreeExtractor = ScreenNodeTreeExtractor(),
+            screenshotProvider = ScreenshotProvider {
+                screenshotCalls += 1
+                "must-not-be-captured"
+            },
+        )
+
+        val context = assembler.collectFrom(
+            packageName = "com.example.wallet",
+            activityName = "Payment",
+            root = ScreenNodeSnapshot(
+                children = listOf(ScreenNodeSnapshot(className = "android.webkit.WebView", scrollable = true)),
+            ),
+        )
+
+        assertNull(context.screenshotBase64)
+        assertEquals(0, screenshotCalls)
     }
 }

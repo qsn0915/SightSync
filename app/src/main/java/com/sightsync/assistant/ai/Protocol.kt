@@ -59,6 +59,9 @@ object AiProtocolValidator {
         if (response.spoken.isBlank()) {
             return ProtocolValidationResult(false, "spoken 不能为空")
         }
+        if (response.actions.size > 1) {
+            return ProtocolValidationResult(false, "当前阶段每次最多执行一个动作")
+        }
 
         response.actions.forEach { action ->
             if (action.type !in allowedActions) {

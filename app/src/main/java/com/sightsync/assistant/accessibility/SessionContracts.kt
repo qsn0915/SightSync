@@ -21,12 +21,3 @@ interface ActionRunner {
         sourceScreen: ScreenContext,
     ): List<ActionResult>
 }
-
-enum class VoiceInteractionState {
-    Idle,
-    SpeakingPrompt,
-    Listening,
-    Thinking,
-    SpeakingResult,
-    Acting,
-}

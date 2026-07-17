@@ -2,7 +2,6 @@
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
-import android.os.Build
 import android.util.Base64
 import android.view.Display
 import android.view.accessibility.AccessibilityNodeInfo
@@ -60,7 +59,14 @@ internal class ScreenContextAssembler(
         root: ScreenNodeSource?,
     ): ScreenContext {
         val nodes = root?.let { nodeTreeExtractor.extract(it) }.orEmpty()
-        val screenshot = if (ScreenContextPolicy.shouldAttachScreenshot(nodes)) {
+        val screenshot = if (
+            ScreenContextPolicy.shouldAttachScreenshot(
+                nodes = nodes,
+                packageName = packageName,
+                activityName = activityName,
+                hasReliableNodeTree = root != null,
+            )
+        ) {
             screenshotProvider.takeScreenshotBase64()
         } else {
             null
@@ -117,30 +123,37 @@ private class AccessibilityScreenshotProvider(
     private val service: AccessibilityService,
 ) : ScreenshotProvider {
     override suspend fun takeScreenshotBase64(): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         return suspendCancellableCoroutine { continuation ->
             service.takeScreenshot(
                 Display.DEFAULT_DISPLAY,
                 service.mainExecutor,
                 object : AccessibilityService.TakeScreenshotCallback {
                     override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
-                        val bitmap = Bitmap.wrapHardwareBuffer(
-                            screenshot.hardwareBuffer,
-                            screenshot.colorSpace,
-                        )
-                        screenshot.hardwareBuffer.close()
-                        if (bitmap == null) {
-                            continuation.resume(null)
-                            return
+                        val hardwareBuffer = screenshot.hardwareBuffer
+                        var bitmap: Bitmap? = null
+                        var copy: Bitmap? = null
+                        try {
+                            if (!continuation.isActive) return
+                            bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)
+                            if (bitmap == null) {
+                                continuation.resume(null)
+                                return
+                            }
+                            copy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                            val output = ByteArrayOutputStream()
+                            copy.compress(Bitmap.CompressFormat.JPEG, 45, output)
+                            if (continuation.isActive) {
+                                continuation.resume(Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP))
+                            }
+                        } finally {
+                            copy?.recycle()
+                            bitmap?.recycle()
+                            hardwareBuffer.close()
                         }
-                        val copy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-                        val output = ByteArrayOutputStream()
-                        copy.compress(Bitmap.CompressFormat.JPEG, 45, output)
-                        continuation.resume(Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP))
                     }
 
                     override fun onFailure(errorCode: Int) {
-                        continuation.resume(null)
+                        if (continuation.isActive) continuation.resume(null)
                     }
                 },
             )

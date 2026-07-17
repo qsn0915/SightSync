@@ -28,4 +28,14 @@ class SightSyncPackageBoundaryTest {
             remainingOldPackageReferences.isNotEmpty(),
         )
     }
+
+    @Test
+    fun proxyCredentialsAreNotHardcodedAndReleaseConfigIsValidated() {
+        val gradleFile = File("build.gradle.kts").readText()
+
+        assertFalse(gradleFile.contains("orElse(\"dev-token\")"))
+        assertTrue(gradleFile.contains("validateReleaseProxyConfig"))
+        assertTrue(gradleFile.contains("startsWith(\"https://\")"))
+        assertTrue(gradleFile.contains("APP_API_TOKEN is required for release"))
+    }
 }

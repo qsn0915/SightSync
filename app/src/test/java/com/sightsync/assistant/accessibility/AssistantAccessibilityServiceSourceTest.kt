@@ -37,6 +37,27 @@ class AssistantAccessibilityServiceSourceTest {
     }
 
     @Test
+    fun serviceConnectionStaysIdleUntilUserExplicitlyStartsListening() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+        val connectedBody = source.substringAfter("override fun onServiceConnected()")
+            .substringBefore("override fun onAccessibilityEvent")
+        val afterOverlayShown = connectedBody.substringAfter("overlayController.show()")
+
+        assertFalse(afterOverlayShown.contains("startVisibleListening()"))
+        assertTrue(connectedBody.contains("overlayController.show()"))
+    }
+
+    @Test
+    fun startingListeningChecksAllVisibleListeningPermissions() {
+        val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
+
+        assertTrue(source.contains("Manifest.permission.RECORD_AUDIO"))
+        assertTrue(source.contains("Manifest.permission.POST_NOTIFICATIONS"))
+        assertTrue(source.contains("Settings.canDrawOverlays(this)"))
+        assertTrue(source.contains("PackageManager.PERMISSION_GRANTED"))
+    }
+
+    @Test
     fun ttsInitializationFailureUsesVisibleFallbackStatus() {
         val source = File("src/main/java/com/sightsync/assistant/accessibility/AssistantAccessibilityService.kt").readText()
 
@@ -59,7 +80,7 @@ class AssistantAccessibilityServiceSourceTest {
 
     @Test
     fun v2SpeechAcceptanceChecklistDocumentsLongRunningManualChecks() {
-        val source = File("../docs/v2-speech-acceptance.md")
+        val source = File("../docs/acceptance/v2-speech-acceptance.md")
 
         assertTrue(source.exists())
 

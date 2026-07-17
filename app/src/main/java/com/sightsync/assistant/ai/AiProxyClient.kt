@@ -5,10 +5,13 @@ import com.sightsync.assistant.core.ScreenContext
 import com.sightsync.assistant.speech.RecordedAudio
 import com.sightsync.assistant.speech.TranscriptionClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -17,6 +20,7 @@ import java.io.IOException
 import java.io.InterruptedIOException
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class AiProxyClient(
     baseUrl: String,
@@ -74,7 +78,7 @@ class AiProxyClient(
         }
     }
 
-    private fun <T> executeWithSingleRetry(
+    private suspend fun <T> executeWithSingleRetry(
         endpoint: AiProxyEndpoint,
         request: Request,
         parse: (String) -> T,
@@ -82,7 +86,7 @@ class AiProxyClient(
         var attempt = 0
         while (true) {
             try {
-                httpClient.newCall(request).execute().use { response ->
+                httpClient.newCall(request).awaitResponse().use { response ->
                     if (!response.isSuccessful) throw response.toProxyException(endpoint)
                     val responseBody = response.body?.string()
                         ?: throw AiProxyException(
@@ -127,6 +131,32 @@ class AiProxyClient(
             }
         }
     }
+
+    private suspend fun Call.awaitResponse(): Response =
+        suspendCancellableCoroutine { continuation ->
+            val pendingResponse = AtomicReference<Response?>(null)
+            continuation.invokeOnCancellation {
+                cancel()
+                pendingResponse.getAndSet(null)?.close()
+            }
+            enqueue(object : Callback {
+                override fun onFailure(call: Call, error: IOException) {
+                    if (continuation.isActive) {
+                        continuation.resumeWith(Result.failure(error))
+                    }
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    pendingResponse.set(response)
+                    if (!continuation.isActive) {
+                        pendingResponse.getAndSet(null)?.close()
+                        return
+                    }
+                    continuation.resumeWith(Result.success(response))
+                    pendingResponse.compareAndSet(response, null)
+                }
+            })
+        }
 
     private fun Response.toProxyException(endpoint: AiProxyEndpoint): AiProxyException {
         val errorType = when (code) {

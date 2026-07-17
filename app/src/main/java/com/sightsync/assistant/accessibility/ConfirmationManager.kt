@@ -8,18 +8,27 @@ data class PendingActionRequest(
     val sourceScreen: ScreenContext,
 )
 
-class ConfirmationManager {
+class ConfirmationManager(
+    private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
+) {
     private var pendingRequest: PendingActionRequest? = null
+    private var storedAtMillis: Long = 0L
 
     val hasPending: Boolean
-        get() = pendingRequest != null
+        get() {
+            expireIfNeeded()
+            return pendingRequest != null
+        }
 
     fun store(response: AssistResponse, sourceScreen: ScreenContext) {
         pendingRequest = PendingActionRequest(response, sourceScreen)
+        storedAtMillis = nowMillis()
     }
 
     fun consumeIfConfirmed(utterance: String): PendingActionRequest? {
-        if (!isConfirmation(utterance)) return null
+        expireIfNeeded()
+        val normalized = normalize(utterance)
+        if (isCancellationNormalized(normalized) || normalized !in confirmationPhrases) return null
         val request = pendingRequest ?: return null
         pendingRequest = null
         return request
@@ -27,26 +36,32 @@ class ConfirmationManager {
 
     fun clear() {
         pendingRequest = null
+        storedAtMillis = 0L
     }
 
     fun isCancellation(utterance: String): Boolean =
+        isCancellationNormalized(normalize(utterance))
+
+    private fun isCancellationNormalized(utterance: String): Boolean =
         cancellationPhrases.any(utterance::contains)
 
-    private fun isConfirmation(utterance: String): Boolean =
-        confirmationPhrases.any(utterance::contains)
+    private fun normalize(utterance: String): String =
+        utterance.filterNot { character ->
+            character.isWhitespace() || character in punctuation
+        }
+
+    private fun expireIfNeeded() {
+        if (pendingRequest == null) return
+        val elapsedMillis = nowMillis() - storedAtMillis
+        if (elapsedMillis >= CONFIRMATION_TTL_MILLIS) clear()
+    }
 
     private companion object {
-        val confirmationPhrases = listOf(
-            "确认",
+        const val CONFIRMATION_TTL_MILLIS = 90_000L
+
+        val confirmationPhrases = setOf(
+            "确认执行",
             "继续执行",
-            "好的",
-            "行",
-            "可以",
-            "没问题",
-            "对",
-            "嗯",
-            "执行吧",
-            "弄吧",
         )
 
         val cancellationPhrases = listOf(
@@ -59,5 +74,7 @@ class ConfirmationManager {
             "别弄了",
             "不了",
         )
+
+        const val punctuation = "，。！？；：、,.!?;:"
     }
 }

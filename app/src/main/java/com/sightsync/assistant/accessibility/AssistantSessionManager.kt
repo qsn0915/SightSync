@@ -15,6 +15,7 @@ import com.sightsync.assistant.speech.SpeechInput
 import com.sightsync.assistant.speech.SpeechInputResult
 import com.sightsync.assistant.speech.SpeechOutput
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -36,14 +37,13 @@ class AssistantSessionManager(
 ) {
     private var activeJob: Job? = null
     private var continuousJob: Job? = null
+    private var continuousGeneration: Long = 0L
     private val confirmationManager = ConfirmationManager()
     private val sessionId = UUID.randomUUID().toString()
-    private var voiceState: VoiceInteractionState = VoiceInteractionState.Idle
     private var pendingOpenAppCandidatePackages: Set<String> = emptySet()
     private val voiceTurnCoordinator = VoiceTurnCoordinator(
         speechInput = speechInput,
         speechOutput = speechOutput,
-        onStateChanged = { state -> voiceState = state },
     )
 
     val isContinuousListening: Boolean
@@ -85,7 +85,9 @@ class AssistantSessionManager(
             voiceTurnCoordinator.cancelVoice()
         }
 
-        continuousJob = scope.launch {
+        continuousGeneration += 1L
+        val generation = continuousGeneration
+        val newJob = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 voiceTurnCoordinator.speakResult("连续聆听已开启。")
                 while (true) {
@@ -99,15 +101,21 @@ class AssistantSessionManager(
                     }
                 }
             } finally {
-                continuousJob = null
-                onContinuousListeningChanged(false)
+                if (generation == continuousGeneration) {
+                    continuousJob = null
+                    onContinuousListeningChanged(false)
+                }
             }
         }
+        continuousJob = newJob
         onContinuousListeningChanged(true)
+        newJob.start()
     }
 
     fun stopContinuousListening() {
         val running = continuousJob ?: return
+        continuousGeneration += 1L
+        val stoppedGeneration = continuousGeneration
         running.cancel()
         continuousJob = null
         onContinuousListeningChanged(false)
@@ -115,7 +123,9 @@ class AssistantSessionManager(
         pendingOpenAppCandidatePackages = emptySet()
         voiceTurnCoordinator.cancelVoice()
         scope.launch {
-            voiceTurnCoordinator.speakResult("已停止聆听。")
+            if (continuousGeneration == stoppedGeneration && continuousJob == null) {
+                voiceTurnCoordinator.speakResult("已停止聆听。")
+            }
         }
     }
 
@@ -154,7 +164,7 @@ class AssistantSessionManager(
                 }
                 return TurnResult.Completed
             }
-            debugLog("ASR utterance='$utterance'")
+            debugLog("ASR recognized. characters=${utterance.length}")
             val confirmedRequest = confirmationManager.consumeIfConfirmed(utterance)
             if (confirmedRequest != null) {
                 pendingOpenAppCandidatePackages = emptySet()
@@ -191,7 +201,6 @@ class AssistantSessionManager(
             }
 
             voiceTurnCoordinator.speakResult("正在查看当前屏幕。")
-            voiceState = VoiceInteractionState.Thinking
             val screenContext = screenContextProvider.collect()
             val response = assistantClient.assist(
                 sessionId = sessionId,
@@ -218,8 +227,8 @@ class AssistantSessionManager(
         } catch (serialization: SerializationException) {
             voiceTurnCoordinator.speakResult("AI 返回内容无法解析，已停止执行。")
             TurnResult.Completed
-        } catch (error: Throwable) {
-            voiceTurnCoordinator.speakResult("操作失败，请重试。${error.message ?: "未知错误"}")
+        } catch (_: Throwable) {
+            voiceTurnCoordinator.speakResult("操作失败，请重试。")
             TurnResult.Completed
         }
     }
@@ -243,28 +252,31 @@ class AssistantSessionManager(
         )) {
             is OpenAppCommandResult.Resolved -> {
                 pendingOpenAppCandidatePackages = emptySet()
-                debugLog("Local open-app resolved. actions=${result.response.actions}")
+                debugLog(
+                    "Local open-app resolved. actions=${result.response.actions.size} " +
+                        "types=${result.response.actions.joinToString(",") { it.type }}",
+                )
                 processPlannedResponse(utterance, result.response, localActionScreenContext())
                 true
             }
 
             is OpenAppCommandResult.Ambiguous -> {
                 pendingOpenAppCandidatePackages = result.candidatePackages
-                debugLog("Local open-app ambiguous. candidates=${result.candidatePackages}")
+                debugLog("Local open-app ambiguous. candidates=${result.candidatePackages.size}")
                 voiceTurnCoordinator.speakResult(result.response.spoken)
                 true
             }
 
             is OpenAppCommandResult.Alternatives -> {
                 pendingOpenAppCandidatePackages = result.candidatePackages
-                debugLog("Local open-app alternatives. target=${result.target} candidates=${result.candidatePackages}")
+                debugLog("Local open-app alternatives. candidates=${result.candidatePackages.size}")
                 voiceTurnCoordinator.speakResult(result.response.spoken)
                 true
             }
 
             is OpenAppCommandResult.NoMatch -> {
                 pendingOpenAppCandidatePackages = emptySet()
-                debugLog("Local open-app no match. target=${result.target}")
+                debugLog("Local open-app no match.")
                 voiceTurnCoordinator.speakResult(result.response.spoken)
                 true
             }
@@ -314,7 +326,6 @@ class AssistantSessionManager(
             voiceTurnCoordinator.speakResult(response.spoken)
         }
         if (response.actions.isEmpty()) return
-        voiceState = VoiceInteractionState.Acting
         val results = actionRunner.execute(response.actions, confirmed, sourceScreen)
         val failed = results.firstOrNull { !it.success }
         if (failed != null) {

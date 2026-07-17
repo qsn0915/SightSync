@@ -4,7 +4,8 @@ import {
   validateAssistRequest,
   validateAssistResponse,
   validateTranscribeRequest,
-  createFallbackAssistResponse
+  createFallbackAssistResponse,
+  sanitizeAssistResponse
 } from '../src/protocol.js';
 
 test('validateAssistRequest accepts minimal valid request', () => {
@@ -54,6 +55,55 @@ test('validateAssistResponse requires nodeId for CLICK_NODE', () => {
 
   assert.equal(result.valid, false);
   assert.equal(result.reason, 'CLICK_NODE requires nodeId');
+});
+
+test('validateAssistResponse rejects multiple actions in single-step phase', () => {
+  const result = validateAssistResponse({
+    spoken: '我会连续执行。',
+    requiresConfirmation: false,
+    actions: [{ type: 'GLOBAL_BACK' }, { type: 'GLOBAL_HOME' }]
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.reason, 'only one action is allowed');
+});
+
+test('sanitizeAssistResponse strips provider-only action fields', () => {
+  const response = sanitizeAssistResponse({
+    spoken: '我会点击。',
+    requiresConfirmation: false,
+    actions: [{
+      type: 'CLICK_NODE',
+      nodeId: 'node_ok',
+      script: 'malicious()',
+      metadata: { secret: true }
+    }]
+  });
+
+  assert.deepEqual(response.actions, [{ type: 'CLICK_NODE', nodeId: 'node_ok' }]);
+});
+
+test('validateAssistRequest rejects oversized utterances and node lists', () => {
+  const oversizedUtterance = validateAssistRequest({
+    sessionId: 'session-1',
+    locale: 'zh-CN',
+    utterance: 'x'.repeat(4_001),
+    screen: { packageName: 'com.example', nodes: [] }
+  });
+  const oversizedNodes = validateAssistRequest({
+    sessionId: 'session-1',
+    locale: 'zh-CN',
+    utterance: 'test',
+    screen: {
+      packageName: 'com.example',
+      nodes: Array.from({ length: 201 }, () => ({ nodeId: 'node', role: 'TextView' }))
+    }
+  });
+
+  assert.equal(oversizedUtterance.valid, false);
+  assert.equal(oversizedUtterance.reason, 'utterance is too long');
+  assert.equal(oversizedNodes.valid, false);
+  assert.equal(oversizedNodes.reason, 'screen.nodes exceeds limit');
 });
 
 test('createFallbackAssistResponse describes current page without actions', () => {
@@ -176,4 +226,15 @@ test('validateTranscribeRequest rejects unsupported audio mime types', () => {
 
   assert.equal(result.valid, false);
   assert.equal(result.reason, 'unsupported audio mimeType: text/plain');
+});
+
+test('validateTranscribeRequest rejects malformed base64 audio', () => {
+  const result = validateTranscribeRequest({
+    locale: 'zh-CN',
+    mimeType: 'audio/wav',
+    audioBase64: 'not base64!'
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.reason, 'audioBase64 must be valid base64');
 });

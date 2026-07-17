@@ -41,15 +41,25 @@ class ScreenNodeTreeExtractor(
             if (nodes.size >= maxNodes) return
 
             val role = snapshot.className?.substringAfterLast('.')?.ifBlank { null } ?: "Unknown"
+            val rawText = snapshot.text.trimToNull()
+            val rawDescription = snapshot.contentDescription.trimToNull()
             val text = SensitiveTextRedactor.redact(
-                snapshot.text.trimToNull(),
+                rawText,
                 role = role,
                 isPassword = snapshot.password,
+                context = rawDescription,
             )
             val description = SensitiveTextRedactor.redact(
-                snapshot.contentDescription.trimToNull(),
+                rawDescription,
                 role = role,
                 isPassword = snapshot.password,
+                context = rawText,
+            )
+            val sensitive = SensitiveTextRedactor.isSensitive(
+                value = rawText,
+                role = role,
+                isPassword = snapshot.password,
+                context = rawDescription,
             )
             val hasUsefulContent = !text.isNullOrBlank() ||
                 !description.isNullOrBlank() ||
@@ -67,6 +77,7 @@ class ScreenNodeTreeExtractor(
                     clickable = snapshot.clickable,
                     editable = snapshot.editable,
                     scrollable = snapshot.scrollable,
+                    sensitive = sensitive,
                 )
             }
 
@@ -84,7 +95,31 @@ class ScreenNodeTreeExtractor(
 }
 
 object ScreenContextPolicy {
-    fun shouldAttachScreenshot(nodes: List<ScreenNode>): Boolean {
+    private val sensitiveContextKeywords = listOf(
+        "支付",
+        "付款",
+        "转账",
+        "密码",
+        "验证码",
+        "wallet",
+        "payment",
+        "checkout",
+        "bank",
+        "login",
+        "auth",
+    )
+
+    fun shouldAttachScreenshot(
+        nodes: List<ScreenNode>,
+        packageName: String = "",
+        activityName: String? = null,
+        hasReliableNodeTree: Boolean = true,
+    ): Boolean {
+        if (!hasReliableNodeTree) return false
+        if (nodes.any(ScreenNode::sensitive)) return false
+
+        val metadata = "$packageName ${activityName.orEmpty()}".lowercase()
+        if (sensitiveContextKeywords.any(metadata::contains)) return false
         if (nodes.isEmpty()) return true
 
         val labeledNodes = nodes.count { node ->

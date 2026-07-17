@@ -16,6 +16,7 @@ import com.sightsync.assistant.core.ScreenNode
 import com.sightsync.assistant.speech.SpeechInput
 import com.sightsync.assistant.speech.SpeechInputResult
 import com.sightsync.assistant.speech.SpeechOutput
+import com.sightsync.assistant.speech.SpeechOutputException
 import java.io.IOException
 import java.io.InterruptedIOException
 import kotlinx.coroutines.CompletableDeferred
@@ -26,6 +27,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.SerializationException
 import org.junit.Assert.assertEquals
@@ -107,6 +109,41 @@ class AssistantSessionManagerPhase2Test {
         assertEquals(2, screen.collectCount)
         assertFalse(manager.isContinuousListening)
         assertTrue(tts.spoken.contains("已停止聆听。"))
+    }
+
+    @Test
+    fun unavailableSpeechOutputDoesNotCrashContinuousListening() = runTest {
+        val stateChanges = mutableListOf<Boolean>()
+        val speech = FakeSpeechInput(SpeechInputResult.Recognized("停止聆听"))
+        val manager = manager(
+            tts = UnavailableSpeechOutput(),
+            speech = speech,
+            onContinuousListeningChanged = stateChanges::add,
+        )
+
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertEquals(listOf("停止聆听"), speech.startedUtterances)
+        assertEquals(listOf(true, false), stateChanges)
+        assertFalse(manager.isContinuousListening)
+    }
+
+    @Test
+    fun unavailableSpeechOutputDoesNotPreventOneShotListening() = runTest {
+        val speech = FakeSpeechInput(SpeechInputResult.Recognized("这里有什么"))
+        val ai = FakeAssistantClient(response = AssistResponse(spoken = "当前页面有设置。"))
+        val manager = manager(
+            tts = UnavailableSpeechOutput(),
+            speech = speech,
+            ai = ai,
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertEquals(listOf("这里有什么"), speech.startedUtterances)
+        assertEquals(listOf("这里有什么"), ai.utterances)
     }
 
     @Test
@@ -210,6 +247,25 @@ class AssistantSessionManagerPhase2Test {
         assertTrue(speech.cancelCalled)
         assertFalse(manager.isContinuousListening)
         assertTrue(tts.spoken.contains("已停止聆听。"))
+    }
+
+    @Test
+    fun rapidStopThenRestartKeepsNewestContinuousSessionActive() = runTest {
+        val stateChanges = mutableListOf<Boolean>()
+        val manager = manager(
+            tts = FakeSpeechOutput(),
+            speech = FakeSpeechInput(),
+            onContinuousListeningChanged = stateChanges::add,
+        )
+
+        manager.startContinuousListening()
+        runCurrent()
+        manager.stopContinuousListening()
+        manager.startContinuousListening()
+        advanceUntilIdle()
+
+        assertTrue(manager.isContinuousListening)
+        assertTrue(stateChanges.last())
     }
 
     @Test
@@ -331,6 +387,22 @@ class AssistantSessionManagerPhase2Test {
     }
 
     @Test
+    fun unexpectedFailureDoesNotSpeakInternalErrorDetails() = runTest {
+        val tts = FakeSpeechOutput()
+        val manager = manager(
+            tts = tts,
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("这里有什么")),
+            ai = FakeAssistantClient(error = IllegalStateException("secret-token-and-internal-url")),
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(tts.spoken.contains("操作失败，请重试。"))
+        assertFalse(tts.spoken.any { it.contains("secret-token") || it.contains("internal-url") })
+    }
+
+    @Test
     fun readOnlyQuestionDoesNotExecuteActions() = runTest {
         val tts = FakeSpeechOutput()
         val actions = FakeActionRunner()
@@ -377,9 +449,27 @@ class AssistantSessionManagerPhase2Test {
             actions.executions.single().actions,
         )
         assertTrue(tts.spoken.contains("我会打开设置。"))
-        assertTrue(logger.messages.contains("SightSyncSession: ASR utterance='帮我打开设置'"))
+        assertTrue(logger.messages.contains("SightSyncSession: ASR recognized. characters=6"))
+        assertFalse(logger.messages.any { it.contains("帮我打开设置") })
         assertTrue(logger.messages.contains("SightSyncSession: Resolving local open-app command. pendingCandidates=0"))
-        assertTrue(logger.messages.any { it.startsWith("SightSyncSession: Local open-app resolved.") })
+        assertTrue(logger.messages.contains("SightSyncSession: Local open-app resolved. actions=1 types=OPEN_APP"))
+    }
+
+    @Test
+    fun sensitiveAsrContentNeverAppearsInDiagnosticLogs() = runTest {
+        val logger = FakeDiagnosticLogger()
+        val manager = manager(
+            tts = FakeSpeechOutput(),
+            speech = FakeSpeechInput(SpeechInputResult.Recognized("验证码123456")),
+            ai = FakeAssistantClient(response = AssistResponse(spoken = "已处理。")),
+            diagnosticLogger = logger,
+        )
+
+        manager.onAssistantRequested()
+        advanceUntilIdle()
+
+        assertTrue(logger.messages.contains("SightSyncSession: ASR recognized. characters=9"))
+        assertFalse(logger.messages.any { it.contains("123456") || it.contains("验证码") })
     }
 
     @Test
@@ -965,6 +1055,7 @@ class AssistantSessionManagerPhase2Test {
         actions: FakeActionRunner = FakeActionRunner(),
         openAppCommandResolver: OpenAppCommandResolver? = null,
         diagnosticLogger: com.sightsync.assistant.diagnostics.DiagnosticLogger = com.sightsync.assistant.diagnostics.NoOpDiagnosticLogger,
+        onContinuousListeningChanged: (Boolean) -> Unit = {},
     ): AssistantSessionManager {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
@@ -977,6 +1068,7 @@ class AssistantSessionManagerPhase2Test {
             actionRunner = actions,
             openAppCommandResolver = openAppCommandResolver,
             diagnosticLogger = diagnosticLogger,
+            onContinuousListeningChanged = onContinuousListeningChanged,
         )
     }
 }
@@ -1047,6 +1139,19 @@ private class FakeSpeechOutput(
         stopCalled = true
         isSpeakingValue = false
     }
+}
+
+private class UnavailableSpeechOutput : SpeechOutput {
+    override val isAvailable: Boolean = false
+    override val isSpeaking: Boolean = false
+
+    override fun speak(text: String) = Unit
+
+    override suspend fun speakAndAwait(text: String) {
+        throw SpeechOutputException("语音输出初始化失败。")
+    }
+
+    override fun stop() = Unit
 }
 
 private class FakeScreenContextProvider(

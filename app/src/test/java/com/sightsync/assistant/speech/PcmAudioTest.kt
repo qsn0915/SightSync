@@ -38,6 +38,10 @@ class PcmAudioTest {
 
         assertTrue(source.contains("AudioRecord"))
         assertTrue(source.contains("\"audio/wav\""))
+        assertTrue(source.contains("SystemClock.elapsedRealtime()"))
+        assertTrue(source.contains("currentCoroutineContext().ensureActive()"))
+        assertTrue(source.contains("if (read <= 0)"))
+        assertTrue(source.contains("synchronized(recorderLock)"))
     }
 
     private fun ByteArray.littleEndianInt(offset: Int): Int =

@@ -73,6 +73,26 @@ class ScreenNodeTreeExtractorTest {
     }
 
     @Test
+    fun redactsCrossFieldVerificationCodeAndMarksNodeSensitive() {
+        val root = ScreenNodeSnapshot(
+            children = listOf(
+                ScreenNodeSnapshot(
+                    text = "123456",
+                    contentDescription = "短信验证码",
+                    className = "android.widget.EditText",
+                    editable = true,
+                ),
+            ),
+        )
+
+        val node = ScreenNodeTreeExtractor().extract(root).single()
+
+        assertEquals("[验证码已隐藏]", node.text)
+        assertEquals("短信验证码", node.contentDescription)
+        assertTrue(node.sensitive)
+    }
+
+    @Test
     fun limitsExtractedNodesForAiPayloadSize() {
         val root = ScreenNodeSnapshot(
             children = (0 until 250).map { index ->

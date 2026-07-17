@@ -20,6 +20,7 @@ data class ScreenNode(
     val clickable: Boolean,
     val editable: Boolean,
     val scrollable: Boolean,
+    val sensitive: Boolean = false,
 )
 
 @Serializable

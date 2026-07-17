@@ -1,5 +1,6 @@
 package com.sightsync.assistant.accessibility
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,10 +9,13 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
 import com.sightsync.assistant.BuildConfig
@@ -87,7 +91,6 @@ class AssistantAccessibilityService : AccessibilityService() {
             }
         }
         overlayController.show()
-        startVisibleListening()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
@@ -110,11 +113,27 @@ class AssistantAccessibilityService : AccessibilityService() {
     }
 
     private fun startVisibleListening() {
+        if (!hasVisibleListeningPermissions()) {
+            Toast.makeText(
+                this,
+                "请先在主界面授予麦克风、悬浮窗和通知权限。",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
         if (!startListeningForeground()) {
             ttsOutputController.speak("无法显示连续聆听通知，请检查通知权限后重试。")
             return
         }
         sessionManager.startContinuousListening()
+    }
+
+    private fun hasVisibleListeningPermissions(): Boolean {
+        val microphoneGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        val notificationGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        return microphoneGranted && notificationGranted && Settings.canDrawOverlays(this)
     }
 
     private fun stopVisibleListening() {

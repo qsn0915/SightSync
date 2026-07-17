@@ -88,6 +88,14 @@ class NodeMatcherTest {
     }
 
     @Test
+    fun snapshotDoesNotMatchWhenCurrentLabelOnlyContainsExpectedLabel() {
+        val expected = nodes[1].copy(text = "确认")
+        val current = expected.copy(text = "确认并支付")
+
+        assertFalse(NodeMatcher.matchesSnapshot(current = current, expected = expected))
+    }
+
+    @Test
     fun snapshotDoesNotMatchWhenClickableTargetStopsBeingClickable() {
         val expected = nodes[1]
         val current = expected.copy(clickable = false)
@@ -99,6 +107,22 @@ class NodeMatcherTest {
     fun snapshotDoesNotMatchWhenBoundsMoveTooFar() {
         val expected = nodes[1]
         val current = expected.copy(bounds = NodeBounds(260, 100, 460, 180))
+
+        assertFalse(NodeMatcher.matchesSnapshot(current = current, expected = expected))
+    }
+
+    @Test
+    fun snapshotDoesNotMatchWhenKnownBoundsBecomeUnavailable() {
+        val expected = nodes[1]
+        val current = expected.copy(bounds = NodeBounds(0, 0, 0, 0))
+
+        assertFalse(NodeMatcher.matchesSnapshot(current = current, expected = expected))
+    }
+
+    @Test
+    fun snapshotDoesNotMatchWhenTargetMovesByFiftyPixels() {
+        val expected = nodes[1]
+        val current = expected.copy(bounds = NodeBounds(50, 100, 250, 180))
 
         assertFalse(NodeMatcher.matchesSnapshot(current = current, expected = expected))
     }
