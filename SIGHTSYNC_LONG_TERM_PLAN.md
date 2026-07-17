@@ -19,7 +19,7 @@
 
 ## 当前进度
 
-截至 2026-06-22：
+截至 2026-07-17：
 
 - Phase 1 小片 1 已完成：确认/取消词扩展、手机号/身份证/邮箱脱敏、节点 bounds 校验。
 - Phase 1 小片 2 已完成：TTS pending utterance registry，降低 `UtteranceProgressListener` 多线程回调导致的状态风险。
@@ -45,6 +45,8 @@
 - Phase 4 小片 3 实现已完成：新增明确浏览器搜索命令解析、默认/唯一浏览器本地选择、地址/搜索栏与提交控件唯一定位，以及基于 `AgentPlanExecutor` 的动态受限任务；打开、聚焦、输入和提交均使用既有白名单动作与无截图页面校验，候选缺失/歧义、页面变化、风险、超时或取消会停止后续操作，远端 `plan` 仍未启用。后端 57 个测试、Android 全量单元测试、debug 构建和 `git diff --check` 通过，App 已在 `emulator-5554` 覆盖安装并冷启动，`MainActivity` 为 top resumed，最新日志无 SightSync 崩溃或 ANR。模拟器默认 Chrome 仍停在首次运行条款页且没有地址栏；未代替用户接受第三方条款，因此真实浏览器搜索端到端验收尚未完成，必须在 Chrome 已初始化的测试设备上补验后才能满足 Phase 4 阶段门槛。
 - Phase 4 小片 4 实现已完成：新增当前页面明确导航解析、可点击父节点候选评分和一次有界语音消歧；找不到候选时只允许在原包名内重新解析，多候选时同时复核点击节点与标签节点快照，同名候选、页面变化、候选失效或仍不唯一时停止。Session 会在执行前播报，点击复用 `AgentPlanExecutor`，风险步骤进入既有二次确认，停止、取消和销毁都会清空待消歧状态。后端 57 个测试、Android 全量单元测试、debug 构建和 `git diff --check` 通过；App 已在恢复后的 `emulator-5554` 覆盖安装并冷启动，`MainActivity` 为 top resumed，最新日志无 SightSync 崩溃或 ANR，系统设置页可读到 8 个可点击节点和“网络”候选。真实语音导航端到端操作未在模拟器执行，保留到 Phase 4 阶段验收补验。
 - Phase 4 小片 5 实现已完成：新增三种明确微信草稿命令解析、微信前台包名约束、搜索入口/精确联系人/消息输入框唯一定位，以及最多四个白名单动作的有界草稿任务；候选缺失或不唯一、页面变化、风险确认、超时、取消和动作失败都会停止。流程只填写联系人和消息草稿，不打开微信、不定位或点击发送、不创建可执行的发送确认；完成后明确要求用户检查内容并手动发送。代码审查补充了“搜索框不得作为消息输入框回退”的 RED→GREEN 回归保护。后端 57 个测试、Android 294 个单元测试、debug 构建和 `git diff --check` 通过；更新后的 App 已在 `emulator-5554` 覆盖安装并冷启动，`MainActivity` 为 top resumed，最新日志无 SightSync 崩溃或 ANR。模拟器未安装 `com.tencent.mm`，未自行安装或登录第三方 App，因此真实微信端到端流程必须在 Phase 4 阶段验收使用已登录测试设备补验。
+- Phase 4 代码、测试和计划已于 2026-07-10 整理为迁移快照提交 `524299f`（`feat: add phase 4 bounded agent tasks`），并推送到 `origin/codex/phase3-screen-summary`。该提交用于保全现有实现和跨电脑接续，不改变阶段验收结论。
+- Phase 4 小片 6 尚未完成：阶段验收计划已写入 `generated-docs/plans/2026-06-27-phase4-acceptance.md`，但计划要求生成的 `generated-docs/acceptance/2026-06-27-phase4-acceptance.md` 尚不存在；浏览器真实搜索、App 内导航语音端到端和已登录微信上的草稿流程仍缺少完整设备验收。因此 Phase 4 仍未通过阶段门槛，Phase 5 继续冻结。下一步应按该验收计划补齐自动化复核、设备四类场景和正式验收记录，再由用户确认是否进入 Phase 5。
 
 ## Phase 1：稳定性和安全底座
 
